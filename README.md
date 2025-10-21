@@ -1,5 +1,10 @@
-<!-- Option A: Flex container (no borders, title left, logo right) -->
-<div style="display:flex; align-items:center; justify-content:space-between; width:100%;">
-  <h1 style="margin:0;">aerosol_sizedist_merge</h1>
-  <img src="assets/CSUsig-R-H357-617rgb.png" alt="Colorado State University" width="400">
-</div>
+<!-- Top banner + right-aligned CSU logo (same pattern as your TAMU example) -->
+<img src="CSU-Rams-Head-Symbol-357.jpg" align="right" height="90" />
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/release/python-3137/)
+
+# aerosol_sizedist_merge
+Python toolkit for merging and analyzing aerosol size distributions.
+
+<!-- (rest of your README content goes here) -->

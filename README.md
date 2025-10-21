@@ -23,7 +23,7 @@ Routines to reconstruct a smooth aerosol size distribution based on multiple siz
 
 ### OPC mie scattering LUT
 
-- **pops_sigma_col_405nm.zarr**
+- **pops_sigma_col_405nm.zarr**  
 Diameter to scattering cross-sections for POPS at **405 nm**, indexed by particle diameter and real and imaginary part of refractive index.
 
 - **uhsas_sigma_col_1054nm.zarr**  

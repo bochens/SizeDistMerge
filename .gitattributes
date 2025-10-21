@@ -1,0 +1,2 @@
+*.zarr/** filter=lfs diff=lfs merge=lfs -text
+*.zarr/** !text !filter !merge !diff

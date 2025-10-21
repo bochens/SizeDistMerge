@@ -1,0 +1,4 @@
+*.zarr
+
+__pycache__/
+*.pyc

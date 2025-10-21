@@ -617,10 +617,7 @@ __all__ = [
     # Monotone + inverse
     "make_monotone_sigma_interpolator",
     # Remap
-    "remap_sizedist_compute",
-    "remap_sizedist_compute_pops",
-    "remap_sizedist_compute_uhsas",
-    "remap_sizedist_lut",
+    "remap_bins_lut",
     # Constants
     "POPS_WAVELENGTH_NM",
     "UHSAS_WAVELENGTH_NM",

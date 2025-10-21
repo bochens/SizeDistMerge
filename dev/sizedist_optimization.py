@@ -72,18 +72,12 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, metric="N", space="linear"):
     x2 = np.asarray(x2, float)
     y2 = np.asarray(y2, float)
 
-    # sort and unique
-    i1 = np.argsort(x1)
-    xu1 = np.unique(x1[i1])
-    yu1 = y1[i1][: xu1.size]
+    xu1, yu1 = x1, y1
+    xu2, yu2 = x2, y2
 
-    i2 = np.argsort(x2)
-    xu2 = np.unique(x2[i2])
-    yu2 = y2[i2][: xu2.size]
-
-    lo = max(xu1[0], xu2[0])
-    hi = min(xu1[-1], xu2[-1])
-    if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
+    lo = max(np.min(xu1), np.min(xu2))
+    hi = min(np.max(xu1), np.max(xu2))
+    if lo >= hi:
         return np.inf
 
     npts = int(max(32, min(128, xu1.size, xu2.size)))

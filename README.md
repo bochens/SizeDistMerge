@@ -13,7 +13,7 @@ Python toolkit for merging aerosol size distributions measured by different aero
 ### `dev/`
 
 - **opc_profiles.py**  
-Utilities for remapping bin diameter of optical particle counters (opc) based on changing refractive index. Calculate, store, and read look up table (LUT) for diameter-scattering crosss-seciton relations.
+Utilities for remapping bin diameter of optical particle counters (opc) based on changing refractive index assumption. Calculate, store, and read look up table (LUT) for diameter-scattering crosss-seciton relations.
 
 - **sizedist_optimization.py**  
 Optimization routines that uses the bin-remapping functions to align aerosol size distribution and simutaneously retrieve aerosol properties (refractive index, density, and etc.) by minimizing the mean square error (mse) of overlapping regions of two or more size distribution.

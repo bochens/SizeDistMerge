@@ -8,10 +8,6 @@ from ict_utils import (
 )
 
 def _get_kwargs_for(label, user_dict, fallback: dict):
-    """
-    Resolve kwargs for a given label with optional '_default' in user_dict.
-    Precedence: user_dict[label] > user_dict['_default'] > fallback
-    """
     out = dict(fallback or {})
     if user_dict:
         if "_default" in user_dict and isinstance(user_dict["_default"], dict):
@@ -20,6 +16,14 @@ def _get_kwargs_for(label, user_dict, fallback: dict):
             out.update(user_dict[label])
     return out
 
+# --- NEW: metric → ylabel mapper ---
+def _moment_ylabel(moment: str) -> str:
+    # Accept either symbols or indices
+    m = str(moment).upper()
+    if m in ("N", "0"): return r"$\mathrm{d}N/\mathrm{d}\log D_p$  (# cm$^{-3}$)"
+    if m in ("S", "2"): return r"$\mathrm{d}S/\mathrm{d}\log D_p$  ($\mu\mathrm{m}^2\,\mathrm{cm}^{-3}$)"
+    if m in ("V", "3"): return r"$\mathrm{d}V/\mathrm{d}\log D_p$  ($\mu\mathrm{m}^3\,\mathrm{cm}^{-3}$)"
+    return ""
 
 def plot_size_distributions(
     specs: dict,                   # {"any_label": (mids, edges, mean, sigma), ...}
@@ -34,7 +38,9 @@ def plot_size_distributions(
     legend: bool = True,
     legend_loc: str = "best",
     legend_labels: dict | None = None,  # {"APS": "APS (raw)", "APS_rho_900": "APS (ρ=900)"}
-    legend_order: list[str] | None = None
+    legend_order: list[str] | None = None,
+    metric: str | None = None,          # <-- NEW
+    ylabel: str | None = None           # <-- NEW (overrides metric if provided)
 ):
     """
     Plot mean ±1σ size distributions as regular lines.
@@ -61,8 +67,15 @@ def plot_size_distributions(
     if ylim is not None:
         ax.set_ylim(*ylim)
 
+    # --- changed: ylabel selection ---
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+    elif metric is not None:
+        ax.set_ylabel(_metric_ylabel(metric))
+    else:
+        ax.set_ylabel(r"$\mathrm{d}N/\mathrm{d}\log D_p$  (# cm$^{-3}$)")
+
     ax.set_xlabel(r"$D_p$ (nm)")
-    ax.set_ylabel(r"$\mathrm{d}N/\mathrm{d}\log D_p$  (# cm$^{-3}$)")
     ax.set_title("Time-averaged size distributions — ±1σ")
     ax.grid(True, which="both", linestyle=":", linewidth=0.6)
 
@@ -70,20 +83,12 @@ def plot_size_distributions(
 
     for key, (mids, edges, vals, sigma) in specs.items():
         lk = _get_kwargs_for(key, line_kwargs, {"linewidth": 1.5})
-
-        # Resolve display label
-        display_label = (
-            (lk.get("label"))
-            or ((legend_labels or {}).get(key))
-            or key
-        )
-        # Don't pass "label" twice if user included it
+        display_label = (lk.get("label")) or ((legend_labels or {}).get(key)) or key
         lk_no_label = {k: v for k, v in lk.items() if k != "label"}
 
         h, = ax.plot(mids, vals, label=display_label, **lk_no_label)
         handles[key] = h
 
-        # Fill handling
         fk = None if fill_kwargs is None else fill_kwargs.get(key, fill_kwargs.get("_default", None))
         if fk is not False:
             ylo = vals - sigma
@@ -138,7 +143,9 @@ def plot_size_distributions_steps(
     legend: bool = True,
     legend_loc: str = "best",
     legend_labels: dict | None = None,
-    legend_order: list[str] | None = None
+    legend_order: list[str] | None = None,
+    moment: str | None = None,          # <-- NEW
+    ylabel: str | None = None           # <-- NEW
 ):
     """
     Plot mean ±1σ size distributions as step histograms with edge-aligned
@@ -160,8 +167,15 @@ def plot_size_distributions_steps(
     if ylim is not None:
         ax.set_ylim(*ylim)
 
+    # --- changed: ylabel selection ---
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+    elif moment is not None:
+        ax.set_ylabel(_moment_ylabel(moment))
+    else:
+        ax.set_ylabel(_moment_ylabel("N"))
+
     ax.set_xlabel(r"$D_p$ (nm)")
-    ax.set_ylabel(r"$\mathrm{d}N/\mathrm{d}\log D_p$  (# cm$^{-3}$)")
     ax.set_title("Time-averaged size distributions — step ±1σ")
     ax.grid(True, which="both", linestyle=":", linewidth=0.6)
 
@@ -169,14 +183,8 @@ def plot_size_distributions_steps(
 
     for key, (mids, edges, vals, sigma) in specs.items():
         lk = _get_kwargs_for(key, line_kwargs, {"linewidth": 2.0})
-        display_label = (
-            (lk.get("label"))
-            or ((legend_labels or {}).get(key))
-            or key
-        )
+        display_label = (lk.get("label")) or ((legend_labels or {}).get(key)) or key
         color = lk.get("color", None)
-
-        # don't pass "label" twice
         lk_no_label = {k: v for k, v in lk.items() if k not in {"label", "color"}}
 
         h = ax.stairs(

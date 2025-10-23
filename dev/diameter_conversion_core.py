@@ -55,10 +55,7 @@ def da_to_dv(
 ):
     """
     Convert aerodynamic diameter(s) Da [nm] -> volume-equivalent diameter(s) Dv [nm].
-    - Accepts scalar or array-like da_nm and returns matching shape (scalar in, scalar out).
-    - If `dndlogdp` is provided, `da_nm` must be BIN EDGES (len = N+1) and this
-      will also return the remapped dN/dlog10Dp on the new Dv edges (length N),
-      conserving bin counts exactly.
+    Accepts scalar or array-like da_nm and returns matching shape (scalar in, scalar out).
     """
     da_nm_arr = np.asarray(da_nm, dtype=float)
     dv_out = np.empty_like(da_nm_arr, dtype=float)

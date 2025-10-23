@@ -29,7 +29,8 @@ DEFAULT_N_RANGE  = (1.30, 1.80, 0.001)    # (min, max, step)
 DEFAULT_K_VALUES = (0.0, 0.001, 0.01, 0.1)
 DEFAULT_CHUNKS   = (128, 64, 1)           # (D, n, k) for Zarr v3
 
-
+RI_UHSAS_SRC=complex(1.52, 0.00)
+RI_POPS_SRC =complex(1.615, 0.001)
 # -------------------------------
 # Geometries
 # -------------------------------
@@ -544,7 +545,7 @@ def make_monotone_sigma_interpolator(
 
 def convert_do_lut(
     Do_nm,
-    m_src, m_dst, lut: "SigmaLUT",
+    ri_src, ri_dst, lut: "SigmaLUT",
     *, n_bins=50, eps=1e-12
 ):
     """
@@ -558,15 +559,15 @@ def convert_do_lut(
 
     # build monotone σ maps on LUT grid
     Dg = np.asarray(lut.Dg, float)
-    ns, ks = float(np.real(m_src)), float(np.imag(m_src))
-    nd, kd = float(np.real(m_dst)), float(np.imag(m_dst))
+    ns, ks = float(np.real(ri_src)), float(np.imag(ri_src))
+    nd, kd = float(np.real(ri_dst)), float(np.imag(ri_dst))
     sigma_src = lut.sigma_curve(Dg, ns, ks)
     sigma_dst = lut.sigma_curve(Dg, nd, kd)
 
     f_src_sigma, _    = make_monotone_sigma_interpolator(Dg, sigma_src, n_bins=n_bins, increasing=True)
     _, D_of_sigma_dst = make_monotone_sigma_interpolator(Dg, sigma_dst, n_bins=n_bins, increasing=True)
 
-    # map edges: D -> σ (at m_src)
+    # map edges: D -> σ (at ri_src)
     sigma_edges = f_src_sigma(Do_nm)
 
     # invert: σ -> D' (at m_dst)

@@ -13,7 +13,6 @@ Python toolkit for merging aerosol size distributions measured by different aero
 ### `dev/`
 
 - **optical_diameter_core.py**
-
 Utilities for computing the **optical response function** — the relationship between particle diameter and collected scattering amplitude — for various Optical Particle Counters (OPCs).  
 Currently, **POPS** and **UHSAS** geometries are implemented using **Mie scattering**.
 

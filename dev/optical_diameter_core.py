@@ -480,7 +480,7 @@ class SigmaLUT:
 
 def make_monotone_sigma_interpolator(
     D_nm, sigma_col, *, increasing=True, sample_weight=None,
-    n_bins=None,
+    response_bins=None,
 ):
     """
     Build monotone σ(D) and its inverse D(σ) with optional binning + isotonic regression.
@@ -494,12 +494,12 @@ def make_monotone_sigma_interpolator(
     x = np.log(D[order])
     y = np.log(S[order])
 
-    if n_bins is not None and n_bins > 1:
-        n_bins = int(n_bins)
-        edges = np.linspace(x.min(), x.max(), n_bins + 1)
+    if response_bins is not None and response_bins > 1:
+        response_bins = int(response_bins)
+        edges = np.linspace(x.min(), x.max(), response_bins + 1)
         xb, yb, wb = [], [], []
-        for i in range(n_bins):
-            if i < n_bins-1:
+        for i in range(response_bins):
+            if i < response_bins-1:
                 mask = (x >= edges[i]) & (x < edges[i+1])
             else:
                 mask = (x >= edges[i]) & (x <= edges[i+1])
@@ -546,7 +546,7 @@ def make_monotone_sigma_interpolator(
 def convert_do_lut(
     Do_nm,
     ri_src, ri_dst, lut: "SigmaLUT",
-    *, n_bins=50, eps=1e-12
+    *, response_bins=50, eps=1e-12
 ):
     """
     Map OPC bins from m_src -> m_dst via σ(D;m). Conserve number exactly:
@@ -564,8 +564,8 @@ def convert_do_lut(
     sigma_src = lut.sigma_curve(Dg, ns, ks)
     sigma_dst = lut.sigma_curve(Dg, nd, kd)
 
-    f_src_sigma, _    = make_monotone_sigma_interpolator(Dg, sigma_src, n_bins=n_bins, increasing=True)
-    _, D_of_sigma_dst = make_monotone_sigma_interpolator(Dg, sigma_dst, n_bins=n_bins, increasing=True)
+    f_src_sigma, _    = make_monotone_sigma_interpolator(Dg, sigma_src, response_bins=response_bins, increasing=True)
+    _, D_of_sigma_dst = make_monotone_sigma_interpolator(Dg, sigma_dst, response_bins=response_bins, increasing=True)
 
     # map edges: D -> σ (at ri_src)
     sigma_edges = f_src_sigma(Do_nm)

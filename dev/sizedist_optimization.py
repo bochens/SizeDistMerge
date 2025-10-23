@@ -1,14 +1,14 @@
 # sizedist_optimization.py
 # Minimal, generic optimizer for refractive index (n, k) using an OPC σ-LUT remap.
-
 from __future__ import annotations
+
 import numpy as np
 from sklearn.metrics import mean_squared_error
 from scipy.optimize import differential_evolution
 
 # Requires your LUT utilities to be available on PYTHONPATH
-from dev.opc_response_calculation import remap_bins_lut, SigmaLUT  # SigmaLUT is imported for convenience
-
+from optical_diameter_core import SigmaLUT, convert_do_lut  # remaps EDGES via σ(D; m)
+from sizedist_utils import remap_dndlog_by_edges, mids_from_edges  # number-conserving remap + mids
 
 __all__ = [
     "_clean",
@@ -49,7 +49,7 @@ def clip_with_edges(mids, y, Dlo, Dhi, xmin=None, xmax=None):
 
 def mse_overlap_sizedist(x1, y1, x2, y2, *, metric="N", space="linear"):
     """
-    Compare two dN/dlogD sizedists over their overlapping diameter range.
+    Compare two size distributions over their overlapping diameter range.
 
     Parameters
     ----------
@@ -72,19 +72,16 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, metric="N", space="linear"):
     x2 = np.asarray(x2, float)
     y2 = np.asarray(y2, float)
 
-    xu1, yu1 = x1, y1
-    xu2, yu2 = x2, y2
-
-    lo = max(np.min(xu1), np.min(xu2))
-    hi = min(np.max(xu1), np.max(xu2))
+    lo = max(np.min(x1), np.min(x2))
+    hi = min(np.max(x1), np.max(x2))
     if lo >= hi:
         return np.inf
 
-    npts = int(max(32, min(128, xu1.size, xu2.size)))
+    npts = int(max(32, min(128, x1.size, x2.size)))
     D = np.geomspace(lo, hi, npts)
 
-    y1g = np.interp(D, xu1, yu1)
-    y2g = np.interp(D, xu2, yu2)
+    y1g = np.interp(D, x1, y1)
+    y2g = np.interp(D, x2, y2)
 
     D_um = D / 1000.0
     if metric == "S":
@@ -113,45 +110,52 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, metric="N", space="linear"):
 
 def objective_opc_vs_ref(
     nk,
-    D_ref,
-    N_ref,
-    Dlo_DRV,
-    Dhi_DRV,
-    N_DRV,
-    m_src,
+    D_ref,                 # reference mids [nm]
+    y_ref,                 # reference dN/dlog10D on D_ref
+    edges_DRV,             # OPC edges [nm], length = M+1
+    y_DRV,                 # OPC dN/dlog10D on edges_DRV bins, length = M
+    m_src,                 # complex refractive index used by OPC binning (source)
     lut: SigmaLUT,
     *,
-    n_bins=100,
+    response_bins=50,
     metric="N",
     space="linear",
 ):
     """
-    Objective for optimizer. Remap OPC spectrum from m_src to trial m_dst = n+ik
-    then compare to reference spectrum over the overlap.
+    Objective for optimizer. Remap OPC bin EDGES from m_src to trial m_dst = n+ik,
+    then remap dN/dlog10D by conserving bin counts, and compare to reference.
+
+    Returns the MSE between reference (D_ref, N_ref) and remapped OPC (Dm, Nm).
     """
     n, k = float(nk[0]), float(nk[1])
-    Dm, Nm, _ = remap_bins_lut(
-        D_lower_nm=Dlo_DRV,
-        D_upper_nm=Dhi_DRV,
-        dNdlog10D=N_DRV,
-        m_src=m_src,
-        m_dst=complex(n, k),
+
+    # 1) Map EDGE array via σ(D; m): edges' -> edges''
+    edges_mapped = convert_do_lut(
+        Do_nm=edges_DRV,
+        ri_src=m_src,
+        ri_dst=complex(n, k),
         lut=lut,
-        n_bins=n_bins,
+        response_bins=response_bins,
     )
-    return mse_overlap_sizedist(D_ref, N_ref, Dm, Nm, metric=metric, space=space)
+
+    # 2) Remap spectrum from old edges -> new edges (number-conserving)
+    Nm = remap_dndlog_by_edges(edges_DRV, edges_mapped, y_DRV)
+
+    # 3) Compare on mids of mapped edges
+    Dm = mids_from_edges(edges_mapped)
+
+    return mse_overlap_sizedist(D_ref, y_ref, Dm, Nm, metric=metric, space=space)
 
 
 def optimize_refractive_index_for_opc(
-    x_ref,
-    y_ref,
-    Dlo_DRV,
-    Dhi_DRV,
-    y_DRV,
+    x_ref,                 # reference mids [nm]
+    y_ref,                 # reference dN/dlog10D on x_ref
+    edges_DRV,             # OPC edges [nm], length = M+1
+    y_DRV,                 # OPC dN/dlog10D on edges_DRV bins, length = M
     m_src,
     lut: SigmaLUT,
     *,
-    n_bins=100,
+    response_bins=50,
     metric="N",
     space="linear",
     bounds=((1.3, 1.8), (0.0, 0.1)),
@@ -160,8 +164,8 @@ def optimize_refractive_index_for_opc(
     seed=123,
 ):
     """
-    Fit complex refractive index (n, k) that best matches a remapped OPC spectrum
-    to a reference spectrum.
+    Fit complex refractive index (n, k) that best matches an OPC spectrum (given as
+    bin edges + dN/dlog10D) remapped via σ(D; m) to a reference spectrum.
 
     Returns
     -------
@@ -174,15 +178,14 @@ def optimize_refractive_index_for_opc(
 
     def obj(nk):
         return objective_opc_vs_ref(
-            nk,
+            nk,                         # nk is a 2d vector, same as bounds
             x_ref,
             y_ref,
-            Dlo_DRV,
-            Dhi_DRV,
+            edges_DRV,
             y_DRV,
             m_src,
             lut,
-            n_bins=n_bins,
+            response_bins=response_bins,
             metric=metric,
             space=space,
         )

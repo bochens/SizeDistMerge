@@ -7,7 +7,7 @@ from sklearn.metrics import mean_squared_error
 from scipy.optimize import differential_evolution
 
 # Requires your LUT utilities to be available on PYTHONPATH
-from opc_merge_core import remap_bins_lut, SigmaLUT  # SigmaLUT is imported for convenience
+from dev.opc_response_calculation import remap_bins_lut, SigmaLUT  # SigmaLUT is imported for convenience
 
 
 __all__ = [

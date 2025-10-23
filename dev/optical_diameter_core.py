@@ -542,8 +542,8 @@ def make_monotone_sigma_interpolator(
 # Size-distribution remap (change refractive index)
 # -------------------------------
 
-def remap_bins_lut(
-    D_lower_nm, D_upper_nm, dNdlog10D,
+def convert_do_lut(
+    Do_nm,
     m_src, m_dst, lut: "SigmaLUT",
     *, n_bins=50, eps=1e-12
 ):
@@ -555,14 +555,6 @@ def remap_bins_lut(
     Returns:
         Dp_centers_nm, dNdlog10Dp_new, Dp_edges_nm
     """
-    # inputs
-    D_lo = np.asarray(D_lower_nm, float)
-    D_hi = np.asarray(D_upper_nm, float)
-    y    = np.asarray(dNdlog10D, float)
-
-    # bin counts in number space
-    dlog10_src = np.log10(D_hi / D_lo)
-    N_bin = y * dlog10_src  # #/cm^3 per original bin
 
     # build monotone σ maps on LUT grid
     Dg = np.asarray(lut.Dg, float)
@@ -574,28 +566,14 @@ def remap_bins_lut(
     f_src_sigma, _    = make_monotone_sigma_interpolator(Dg, sigma_src, n_bins=n_bins, increasing=True)
     _, D_of_sigma_dst = make_monotone_sigma_interpolator(Dg, sigma_dst, n_bins=n_bins, increasing=True)
 
-    # original full edge vector (length n_out+1)
-    E_in = np.concatenate([D_lo, D_hi[-1:]])
-
     # map edges: D -> σ (at m_src)
-    sigma_edges = f_src_sigma(E_in)
+    sigma_edges = f_src_sigma(Do_nm)
 
     # invert: σ -> D' (at m_dst)
-    D_edges_new = D_of_sigma_dst(sigma_edges)
+    Do_nm_new = D_of_sigma_dst(sigma_edges)
 
-    # new centers and density
-    Dp_edges_nm   = D_edges_new
-    Dp_centers_nm = np.sqrt(Dp_edges_nm[:-1] * Dp_edges_nm[1:])
-    dlog10Dp      = np.diff(np.log10(Dp_edges_nm))
-
-    # conserve number in each mapped bin
-    dNdlog10Dp_new = N_bin / dlog10Dp
-
-    # drop NaNs
-    mask = np.isfinite(Dp_centers_nm) & np.isfinite(dNdlog10Dp_new)
-    return Dp_centers_nm[mask], dNdlog10Dp_new[mask], Dp_edges_nm
+    return Do_nm_new
     
-
 
 # -------------------------------
 # Public API

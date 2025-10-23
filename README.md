@@ -10,19 +10,30 @@ Python toolkit for merging aerosol size distributions measured by different aero
 
 ## Repo Structure
 
+
 ### `dev/`
 
 - **optical_diameter_core.py**  
-Utilities for computing the **optical response function** — the relationship between particle diameter and collected scattering amplitude — for various Optical Particle Counters (OPCs).  
-Currently, **POPS** and **UHSAS** geometries are implemented using **Mie scattering**.  
-This module also provides tools for generating and interfacing with **lookup tables (LUTs)** of σ(D; m), which describe the scattering cross-section as a function of particle diameter and refractive index.  
-The function `make_monotone_sigma_interpolator()` enforces monotonicity in the OPC response curve, allowing a one-to-one mapping between diameters at different refractive indices.  
-This enables **remapping** (i.e., converting bin edges between refractive indices) while conserving particle counts.
+  Utilities for computing the **optical response function** — the relationship between particle diameter and collected scattering amplitude — for various Optical Particle Counters (OPCs).  
+  Currently, **POPS** and **UHSAS** geometries are implemented using **Mie scattering**.  
 
-The key function is **`convert_do_lut()`**, which:
-- Takes an array of diameters (typically bin edges for rebinning `dN/dlogDp` data),
-- Applies the OPC response function for a **source refractive index** (e.g., calibration conditions),
-- And remaps to a **target refractive index**, producing a new set of equivalent bin edges that reflect how particle sizing shifts under different optical properties.
+  This module also provides tools for generating and interfacing with **lookup tables (LUTs)** of σ(D; m), which describe the scattering cross-section as a function of particle diameter and refractive index.  
+
+  The function `make_monotone_sigma_interpolator()` enforces monotonicity in the OPC response curve, allowing a one-to-one mapping between diameters at different refractive indices.  
+  This enables **remapping** (i.e., converting bin edges between refractive indices) while conserving particle counts.
+
+  The key function is **`convert_do_lut()`**, which:
+  - Takes an array of diameters (typically bin edges for rebinning `dN/dlogDp` data),
+  - Applies the OPC response function for a **source refractive index** (e.g., calibration conditions),
+  - And remaps to a **target refractive index**, producing a new set of equivalent bin edges that reflect how particle sizing shifts under different optical properties.
+
+- **sizedist_optimization.py**  
+  Optimization routines that use the bin-remapping functions to align aerosol size distributions and simultaneously retrieve aerosol properties (e.g., **refractive index**, **density**, etc.)  
+  by minimizing the **mean squared error (MSE)** over overlapping regions of two or more instruments' size distributions.
+
+- **sizedist_combine.py**  
+  Routines to reconstruct a **smooth aerosol size distribution** from multiple instruments onto a common diameter grid.
+
 
 - **sizedist_optimization.py**  
 Optimization routines that uses the bin-remapping functions to align aerosol size distribution and simutaneously retrieve aerosol properties (refractive index, density, and etc.) by minimizing the mean square error (mse) of overlapping regions of two or more size distribution.

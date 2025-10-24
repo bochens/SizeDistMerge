@@ -14,16 +14,22 @@ Python toolkit for merging aerosol size distributions measured by different aero
 ### `dev/`
 
 - **optical_diameter_core.py**  
-  Utilities for computing the **optical response function** — the relationship between particle diameter and the scattering amplitude (the scattering cross-section integrated over the opc collection angle) — for various Optical Particle Counters (OPCs). Currently, **POPS** and **UHSAS** geometries are implemented using **Mie scattering**.  
+  Contains functions for computing the **optical response function** — the relationship between particle diameter and the scattering amplitude (the scattering cross-section integrated over the opc collection angle) — for various Optical Particle Counters (OPCs). Currently, **POPS** and **UHSAS** geometries are implemented using **Mie scattering**.  
 
   This module also provides tools for generating and interfacing with **lookup tables (LUTs)** of σ(D; m) as a function of particle diameter and refractive index.  
 
   The function `make_monotone_sigma_interpolator()` enforces monotonicity in the OPC response curve, allowing a one-to-one mapping between diameters at different refractive indices. This enables **remapping** (i.e., converting bin edges between refractive indices) while conserving particle counts.
 
   The key function is **`convert_do_lut()`**, which:
-  - Takes an array of diameters (typically bin edges for rebinning `dN/dlogDp` data),
-  - Applies the OPC response function for a **source refractive index** (e.g., calibration conditions),
+  - Takes an array of optical diameters (typically bin edges for rebinning `dN/dlogDp` data),
+  - Applies the OPC response function for a **source refractive index**,
   - And remaps to a **target refractive index**, producing a new set of equivalent bin edges that reflect how particle sizing shifts under different optical properties.
+  - Use pre-computed LUT for speed.
+
+- **diameter-conversion-core.py** 
+Contains `da_to_dv()` to convert aerodynamic diameter (da) to volume equivalent diameter, and is currently used for remapping APS instrument bins based on density and Chi.
+
+Will add more functions to convert among mobility diameter (db), da and dv.
 
 - **sizedist_optimization.py**  
   Optimization routines that use the bin-remapping functions to align aerosol size distributions and simultaneously retrieve aerosol properties (e.g., **refractive index**, **density**, etc.)  
@@ -31,6 +37,9 @@ Python toolkit for merging aerosol size distributions measured by different aero
 
 - **sizedist_combine.py**  
   Routines to reconstruct a **smooth aerosol size distribution** from multiple instruments onto a common diameter grid.
+
+- **sizedist_utils.py**
+Contains useful helper functions for dealing with aerosol size distribution
 
 
 ### OPC mie scattering LUT

@@ -14,7 +14,7 @@ Python toolkit for merging aerosol size distributions measured by different aero
 ### `dev/`
 
 - **optical_diameter_core.py**  
-  Contains functions for computing the **optical response function** — the relationship between particle diameter and the scattering amplitude (the scattering cross-section integrated over the opc collection angle) — for various Optical Particle Counters (OPCs). Currently, **POPS** and **UHSAS** geometries are implemented using **Mie scattering**.  
+  Contains functions for computing the **optical response function** — the relationship between particle diameter and the scattering amplitude (the scattering cross-section integrated over the opc collection angle) based on Mie theory — for various Optical Particle Counters (OPCs). Currently, **POPS** and **UHSAS** geometries are implemented.  
 
   This module also provides tools for generating and interfacing with **lookup tables (LUTs)** of σ(D; m) as a function of particle diameter and refractive index.  
 
@@ -36,11 +36,16 @@ Python toolkit for merging aerosol size distributions measured by different aero
   by minimizing the **mean squared error (MSE)** over overlapping regions of two or more instruments' size distributions.
 
 - **sizedist_combine.py**  
-  Routines to reconstruct a **smooth aerosol size distribution** from multiple instruments onto a common diameter grid.
+  Routines to reconstruct a **smooth aerosol size distribution** from multiple instruments onto a common diameter grid. 
 
 - **sizedist_utils.py**
   Contains useful helper functions for dealing with aerosol size distribution
 
+- **forward_kernel.py** (testing)
+  Forward functions for Twomey inversion
+
+- **twomey_inversion.py** (testing)
+  main Twomey inversion code
 
 ### OPC mie scattering LUT
 

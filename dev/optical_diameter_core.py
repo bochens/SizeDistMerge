@@ -1,8 +1,3 @@
-"""
-opc_profiles.py
-
-"""
-
 from __future__ import annotations
 import os
 os.environ.setdefault("MIEPYTHON_USE_JIT", "1")

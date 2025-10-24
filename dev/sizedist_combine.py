@@ -325,7 +325,7 @@ def merge_sizedists_tikhonov(
     """
     diam_grid_nm = np.asarray(diam_grid_nm, float)
     n_grid = diam_grid_nm.size
-    log_grid = np.log(diam_grid_nm)
+    log_grid = np.log10(diam_grid_nm)
 
     # Accumulate inverse-variance weighted sums on the grid
     weighted_sum_y = np.zeros(n_grid, float)   # Σ_i (α_i * w_ij * y_ij)

@@ -14,13 +14,11 @@ Python toolkit for merging aerosol size distributions measured by different aero
 ### `dev/`
 
 - **optical_diameter_core.py**  
-  Utilities for computing the **optical response function** — the relationship between particle diameter and collected scattering amplitude — for various Optical Particle Counters (OPCs).  
-  Currently, **POPS** and **UHSAS** geometries are implemented using **Mie scattering**.  
+  Utilities for computing the **optical response function** — the relationship between particle diameter and the scattering amplitude (the scattering cross-section integrated over the opc collection angle) — for various Optical Particle Counters (OPCs). Currently, **POPS** and **UHSAS** geometries are implemented using **Mie scattering**.  
 
-  This module also provides tools for generating and interfacing with **lookup tables (LUTs)** of σ(D; m), which describe the scattering cross-section as a function of particle diameter and refractive index.  
+  This module also provides tools for generating and interfacing with **lookup tables (LUTs)** of σ(D; m) as a function of particle diameter and refractive index.  
 
-  The function `make_monotone_sigma_interpolator()` enforces monotonicity in the OPC response curve, allowing a one-to-one mapping between diameters at different refractive indices.  
-  This enables **remapping** (i.e., converting bin edges between refractive indices) while conserving particle counts.
+  The function `make_monotone_sigma_interpolator()` enforces monotonicity in the OPC response curve, allowing a one-to-one mapping between diameters at different refractive indices. This enables **remapping** (i.e., converting bin edges between refractive indices) while conserving particle counts.
 
   The key function is **`convert_do_lut()`**, which:
   - Takes an array of diameters (typically bin edges for rebinning `dN/dlogDp` data),
@@ -34,12 +32,6 @@ Python toolkit for merging aerosol size distributions measured by different aero
 - **sizedist_combine.py**  
   Routines to reconstruct a **smooth aerosol size distribution** from multiple instruments onto a common diameter grid.
 
-
-- **sizedist_optimization.py**  
-Optimization routines that uses the bin-remapping functions to align aerosol size distribution and simutaneously retrieve aerosol properties (refractive index, density, and etc.) by minimizing the mean square error (mse) of overlapping regions of two or more size distribution.
-
-- **sizedist_combine.py**  
-Routines to reconstruct a smooth aerosol size distribution based on multiple size distributions onto a common grid.x
 
 ### OPC mie scattering LUT
 

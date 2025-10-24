@@ -47,6 +47,14 @@ def clip_with_edges(mids, y, Dlo, Dhi, xmin=None, xmax=None):
         m &= mids <= float(xmax)
     return mids[m], y[m], Dlo[m], Dhi[m]
 
+def _has_overlap(xa: np.ndarray, xb: np.ndarray) -> bool:
+    xa = np.asarray(xa, float); xb = np.asarray(xb, float)
+    if xa.size == 0 or xb.size == 0: 
+        return False
+    lo = max(np.min(xa), np.min(xb))
+    hi = min(np.max(xa), np.max(xb))
+    return np.isfinite(lo) and np.isfinite(hi) and lo < hi and lo > 0.0
+
 
 def mse_overlap_sizedist(x1, y1, x2, y2, *, moment="N", space="linear"):
     """
@@ -79,10 +87,10 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, moment="N", space="linear"):
         return np.inf
 
     npts = int(max(32, min(128, x1.size, x2.size)))
-    D = np.geomspace(lo, hi, npts)
+    L = np.linspace(np.log10(lo), np.log10(hi), npts); D = 10.0**L
 
-    y1g = np.interp(D, x1, y1)
-    y2g = np.interp(D, x2, y2)
+    y1g = np.interp(L, np.log10(x1), y1)
+    y2g = np.interp(L, np.log10(x2), y2)
 
     D_um = D / 1000.0
     if moment == "S":
@@ -107,6 +115,7 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, moment="N", space="linear"):
         return float(mean_squared_error(Y1[m], Y2[m]))
     else:
         raise ValueError("space must be 'linear' or 'log'")
+
 
 
 def objective_opc_vs_ref(
@@ -209,8 +218,6 @@ def optimize_refractive_index_for_opc(
     n_best = float(result.x[0])
     k_best = float(result.x[1])
     return n_best, k_best, float(result.fun), result, history
-
-
 
 
 
@@ -328,25 +335,42 @@ def objective_multi_custom(
         mids = mids_from_edges(edges_dst)
         curves.append((mids, y_dst))
 
-    # --- Accumulate cost vs reference ---
-    cost = 0.0
+    # --- Accumulate cost vs reference (overlap-aware, weight-normalized) ---
+    cost_sum = 0.0
+    weight_sum = 0.0
+
     for i, cfg in enumerate(instruments):
         w_ref = float(cfg.get("w_ref", 1.0))
-        if w_ref != 0.0:
-            xm, ym = curves[i]
-            # MSE across the overlapping region of (ref_mids, xm)
-            cost += w_ref * mse_overlap_sizedist(ref_mids, ref_y, xm, ym, moment=moment, space=space)
+        if w_ref == 0.0:
+            continue
 
-    # --- Optional cross-instrument pairwise costs ---
-    # Add terms encouraging agreement between instruments' remapped curves.
+        xm, ym = curves[i]
+        # Only score if there is actual overlap with the reference
+        if _has_overlap(ref_mids, xm):
+            mse = mse_overlap_sizedist(ref_mids, ref_y, xm, ym, moment=moment, space=space)
+            cost_sum   += w_ref * mse
+            weight_sum += w_ref
+
+    # --- Optional cross-instrument pairwise costs (also overlap-aware) ---
     if pair_weights:
         for (i, j, w) in pair_weights:
-            if 0 <= i < len(curves) and 0 <= j < len(curves) and float(w) != 0.0:
+            w = float(w)
+            if w == 0.0:
+                continue
+            if 0 <= i < len(curves) and 0 <= j < len(curves):
                 xi, yi = curves[i]
                 xj, yj = curves[j]
-                cost += float(w) * mse_overlap_sizedist(xi, yi, xj, yj, moment=moment, space=space)
+                if _has_overlap(xi, xj):
+                    mse = mse_overlap_sizedist(xi, yi, xj, yj, moment=moment, space=space)
+                    cost_sum   += w * mse
+                    weight_sum += w
 
-    return float(cost)
+    # Average by total weight of the comparisons that actually had overlap.
+    # If NOTHING overlapped, return 0.0 (neutral: neither reward nor penalize).
+    if weight_sum > 0.0:
+        return float(cost_sum / weight_sum)
+    else:
+        return 0.0
 
 
 def optimize_multi_custom(

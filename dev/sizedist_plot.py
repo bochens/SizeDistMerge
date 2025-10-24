@@ -39,26 +39,36 @@ def plot_size_distributions(
     legend_loc: str = "best",
     legend_labels: dict | None = None,  # {"APS": "APS (raw)", "APS_rho_900": "APS (ρ=900)"}
     legend_order: list[str] | None = None,
-    metric: str | None = None,          # <-- NEW
-    ylabel: str | None = None           # <-- NEW (overrides metric if provided)
+    moment: str | None = None,          # optional: choose ylabel via moment ("N","S","V")
+    ylabel: str | None = None,          # overrides moment if provided
+    # NEW: optionally reuse existing figure/axes (ax required if fig is given)
+    fig: plt.Figure | None = None,
+    ax: plt.Axes | None = None,
+    axf: plt.Axes | None = None,
 ):
     """
     Plot mean ±1σ size distributions as regular lines.
-
-    Styling is fully controlled by `line_kwargs` and `fill_kwargs`.
-    Legend labels can be overridden via:
-      - line_kwargs[label]["label"]
-      - legend_labels[label]
-    Order can be set with legend_order=[...].
+    If `fig`/`ax` are provided, the plot draws onto them (and `axf` for the flag strip).
+    If `show_flag_strip=True` but `axf` is None while `ax` is provided, the flag strip
+    is disabled for this call (so we don't create extra axes unexpectedly).
     """
-    if show_flag_strip:
-        fig, (ax, axf) = plt.subplots(
-            2, 1, figsize=(8, 6),
-            gridspec_kw={"height_ratios":[4,0.15]}, sharex=False
-        )
+    # --- figure/axes handling ---
+    reuse_axes = (ax is not None)
+    if reuse_axes:
+        # If caller gave an ax but no axf, don't create a flag strip
+        if show_flag_strip and axf is None:
+            show_flag_strip = False
+        if fig is None:
+            fig = ax.figure
     else:
-        fig, ax = plt.subplots(1, 1, figsize=(8, 5))
-        axf = None
+        if show_flag_strip:
+            fig, (ax, axf) = plt.subplots(
+                2, 1, figsize=(8, 6),
+                gridspec_kw={"height_ratios":[4,0.15]}, sharex=False
+            )
+        else:
+            fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+            axf = None
 
     ax.set_xscale("log")
     ax.set_yscale(yscale)
@@ -67,16 +77,17 @@ def plot_size_distributions(
     if ylim is not None:
         ax.set_ylim(*ylim)
 
-    # --- changed: ylabel selection ---
+    # ylabel selection
     if ylabel is not None:
         ax.set_ylabel(ylabel)
-    elif metric is not None:
-        ax.set_ylabel(_metric_ylabel(metric))
+    elif moment is not None:
+        ax.set_ylabel(_moment_ylabel(moment))
     else:
-        ax.set_ylabel(r"$\mathrm{d}N/\mathrm{d}\log D_p$  (# cm$^{-3}$)")
+        ax.set_ylabel(_moment_ylabel("N"))
 
     ax.set_xlabel(r"$D_p$ (nm)")
-    ax.set_title("Time-averaged size distributions — ±1σ")
+    if not reuse_axes:
+        ax.set_title("Time-averaged size distributions — ±1σ")
     ax.grid(True, which="both", linestyle=":", linewidth=0.6)
 
     handles = {}
@@ -90,7 +101,7 @@ def plot_size_distributions(
         handles[key] = h
 
         fk = None if fill_kwargs is None else fill_kwargs.get(key, fill_kwargs.get("_default", None))
-        if fk is not False:
+        if fk is not False and sigma is not None:
             ylo = vals - sigma
             yhi = vals + sigma
             if isinstance(fk, dict):
@@ -106,25 +117,26 @@ def plot_size_distributions(
         else:
             ax.legend(loc=legend_loc)
 
-    flag_col = find_flag_column(inlet_flag)
-    segments = flag_segments(inlet_flag[flag_col])
-    fractions = flag_fractions(segments)
-    if len(segments) > 0:
-        frac_txt = " | ".join(f"Flag {k}: {v*100:.0f}%" for k, v in sorted(fractions.items()))
-        ax.text(0.01, 0.98, f"InletFlag time fraction — {frac_txt}",
-                transform=ax.transAxes, va="top", ha="left", fontsize=9)
+    # flag strip (only if we have an axf to draw on)
+    if show_flag_strip and axf is not None:
+        flag_col = find_flag_column(inlet_flag)
+        segments = flag_segments(inlet_flag[flag_col])
+        fractions = flag_fractions(segments)
+        if len(segments) > 0:
+            frac_txt = " | ".join(f"Flag {k}: {v*100:.0f}%" for k, v in sorted(fractions.items()))
+            ax.text(0.01, 0.98, f"InletFlag time fraction — {frac_txt}",
+                    transform=ax.transAxes, va="top", ha="left", fontsize=9)
 
-    if show_flag_strip and len(segments) > 0:
-        cmap = {0:"C0",1:"C1",2:"C2",3:"C3"}
-        for t0, t1, v in segments:
-            axf.axvspan(t0, t1, alpha=0.25, color=cmap.get(v, "0.7"), ec=None)
-        axf.set_xlim(segments[0][0], segments[-1][1])
-        axf.set_ylabel("Inlet\nFlag", rotation=0, labelpad=25, va="center")
-        axf.set_yticks([])
-        axf.grid(False)
-        axf.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-        axf.xaxis.set_minor_locator(mdates.MinuteLocator(interval=2))
-        axf.set_xlabel("Time (UTC)")
+            cmap = {0:"C0",1:"C1",2:"C2",3:"C3"}
+            for t0, t1, v in segments:
+                axf.axvspan(t0, t1, alpha=0.25, color=cmap.get(v, "0.7"), ec=None)
+            axf.set_xlim(segments[0][0], segments[-1][1])
+            axf.set_ylabel("Inlet\nFlag", rotation=0, labelpad=25, va="center")
+            axf.set_yticks([])
+            axf.grid(False)
+            axf.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+            axf.xaxis.set_minor_locator(mdates.MinuteLocator(interval=2))
+            axf.set_xlabel("Time (UTC)")
 
     plt.tight_layout()
     return fig, (ax, axf), handles
@@ -144,21 +156,33 @@ def plot_size_distributions_steps(
     legend_loc: str = "best",
     legend_labels: dict | None = None,
     legend_order: list[str] | None = None,
-    moment: str | None = None,          # <-- NEW
-    ylabel: str | None = None           # <-- NEW
+    moment: str | None = None,          # choose ylabel via moment ("N","S","V")
+    ylabel: str | None = None,          # overrides moment if provided
+    # NEW: optionally reuse existing figure/axes
+    fig: plt.Figure | None = None,
+    ax: plt.Axes | None = None,
+    axf: plt.Axes | None = None,
 ):
     """
-    Plot mean ±1σ size distributions as step histograms with edge-aligned
-    uncertainty shading. Legend labels/order fully controllable.
+    Plot mean ±1σ size distributions as step histograms with edge-aligned uncertainty.
+    If `fig`/`ax` are provided, draw onto them (and `axf` for the flag strip).
     """
-    if show_flag_strip:
-        fig, (ax, axf) = plt.subplots(
-            2, 1, figsize=(8, 6),
-            gridspec_kw={"height_ratios":[4,0.15]}, sharex=False
-        )
+    # --- figure/axes handling ---
+    reuse_axes = (ax is not None)
+    if reuse_axes:
+        if show_flag_strip and axf is None:
+            show_flag_strip = False
+        if fig is None:
+            fig = ax.figure
     else:
-        fig, ax = plt.subplots(1, 1, figsize=(8, 5))
-        axf = None
+        if show_flag_strip:
+            fig, (ax, axf) = plt.subplots(
+                2, 1, figsize=(8, 6),
+                gridspec_kw={"height_ratios":[4,0.15]}, sharex=False
+            )
+        else:
+            fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+            axf = None
 
     ax.set_xscale("log")
     ax.set_yscale(yscale)
@@ -167,7 +191,7 @@ def plot_size_distributions_steps(
     if ylim is not None:
         ax.set_ylim(*ylim)
 
-    # --- changed: ylabel selection ---
+    # ylabel selection
     if ylabel is not None:
         ax.set_ylabel(ylabel)
     elif moment is not None:
@@ -176,7 +200,8 @@ def plot_size_distributions_steps(
         ax.set_ylabel(_moment_ylabel("N"))
 
     ax.set_xlabel(r"$D_p$ (nm)")
-    ax.set_title("Time-averaged size distributions — step ±1σ")
+    if not reuse_axes:
+        ax.set_title("Time-averaged size distributions — step ±1σ")
     ax.grid(True, which="both", linestyle=":", linewidth=0.6)
 
     handles = {}
@@ -198,7 +223,7 @@ def plot_size_distributions_steps(
         handles[key] = h
 
         fk = None if fill_kwargs is None else fill_kwargs.get(key, fill_kwargs.get("_default", None))
-        if fk is not False:
+        if fk is not False and sigma is not None:
             ylo = vals - sigma
             yhi = vals + sigma
             ylo_e = np.r_[ylo, ylo[-1]]
@@ -217,25 +242,25 @@ def plot_size_distributions_steps(
         else:
             ax.legend(loc=legend_loc)
 
-    flag_col = find_flag_column(inlet_flag)
-    segments = flag_segments(inlet_flag[flag_col])
-    fractions = flag_fractions(segments)
-    if len(segments) > 0:
-        frac_txt = " | ".join(f"Flag {k}: {v*100:.0f}%" for k, v in sorted(fractions.items()))
-        ax.text(0.01, 0.98, f"InletFlag time fraction — {frac_txt}",
-                transform=ax.transAxes, va="top", ha="left", fontsize=9)
+    if show_flag_strip and axf is not None:
+        flag_col = find_flag_column(inlet_flag)
+        segments = flag_segments(inlet_flag[flag_col])
+        fractions = flag_fractions(segments)
+        if len(segments) > 0:
+            frac_txt = " | ".join(f"Flag {k}: {v*100:.0f}%" for k, v in sorted(fractions.items()))
+            ax.text(0.01, 0.98, f"InletFlag time fraction — {frac_txt}",
+                    transform=ax.transAxes, va="top", ha="left", fontsize=9)
 
-    if show_flag_strip and len(segments) > 0:
-        cmap = {0:"C0",1:"C1",2:"C2",3:"C3"}
-        for t0, t1, v in segments:
-            axf.axvspan(t0, t1, alpha=0.25, color=cmap.get(v, "0.7"), ec=None)
-        axf.set_xlim(segments[0][0], segments[-1][1])
-        axf.set_ylabel("Inlet\nFlag", rotation=0, labelpad=25, va="center")
-        axf.set_yticks([])
-        axf.grid(False)
-        axf.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-        axf.xaxis.set_minor_locator(mdates.MinuteLocator(interval=2))
-        axf.set_xlabel("Time (UTC)")
+            cmap = {0:"C0",1:"C1",2:"C2",3:"C3"}
+            for t0, t1, v in segments:
+                axf.axvspan(t0, t1, alpha=0.25, color=cmap.get(v, "0.7"), ec=None)
+            axf.set_xlim(segments[0][0], segments[-1][1])
+            axf.set_ylabel("Inlet\nFlag", rotation=0, labelpad=25, va="center")
+            axf.set_yticks([])
+            axf.grid(False)
+            axf.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+            axf.xaxis.set_minor_locator(mdates.MinuteLocator(interval=2))
+            axf.set_xlabel("Time (UTC)")
 
     plt.tight_layout()
     return fig, (ax, axf), handles

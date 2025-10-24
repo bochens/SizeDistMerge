@@ -1,4 +1,4 @@
-# sizedist_optimization.py
+# sizedist_alignment.py
 # Minimal, generic optimizer for refractive index (n, k) using an OPC σ-LUT remap.
 from __future__ import annotations
 from typing import List, Dict, Tuple, Callable
@@ -13,7 +13,6 @@ from diameter_conversion_core import da_to_dv  # APS-style diameter conversion
 
 __all__ = [
     "_clean",
-    "clip_with_edges",
     "mse_overlap_sizedist",
     "objective_opc_vs_ref",
     "optimize_refractive_index_for_opc",
@@ -29,23 +28,6 @@ def _clean(x, y):
     m = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
     return x[m], y[m]
 
-
-def clip_with_edges(mids, y, Dlo, Dhi, xmin=None, xmax=None):
-    """
-    Clip a spectrum and its bin edges to [xmin, xmax] in the mid-point space.
-    Pass None to skip a bound.
-    """
-    mids = np.asarray(mids, dtype=float)
-    y    = np.asarray(y, dtype=float)
-    Dlo  = np.asarray(Dlo, dtype=float)
-    Dhi  = np.asarray(Dhi, dtype=float)
-
-    m = np.ones_like(mids, dtype=bool)
-    if xmin is not None:
-        m &= mids >= float(xmin)
-    if xmax is not None:
-        m &= mids <= float(xmax)
-    return mids[m], y[m], Dlo[m], Dhi[m]
 
 def _has_overlap(xa: np.ndarray, xb: np.ndarray) -> bool:
     xa = np.asarray(xa, float); xb = np.asarray(xb, float)
@@ -86,7 +68,7 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, moment="N", space="linear"):
     if lo >= hi:
         return np.inf
 
-    npts = int(max(32, min(128, x1.size, x2.size)))
+    npts = int(max(128, min(1024, x1.size, x2.size)))
     L = np.linspace(np.log10(lo), np.log10(hi), npts); D = 10.0**L
 
     y1g = np.interp(L, np.log10(x1), y1)

@@ -8,8 +8,6 @@ import numpy as np
 # - Given fine-grid edges E_f (log10 D) and instrument edges E_I (log10 D),
 #   K[j,i] = length of overlap in log10 D between fine bin i and instrument bin j.
 #   Then  N_inst[j] = sum_i K[j,i] * (dN/dlog10D)[i].
-#
-# Keep it dead simple per Bo's request: no try/except, no optional fallbacks.
 
 
 def K_tophat(fine_edges_log10D: np.ndarray, inst_edges_log10D: np.ndarray) -> np.ndarray:

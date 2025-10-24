@@ -31,7 +31,7 @@ Python toolkit for merging aerosol size distributions measured by different aero
 
   Will add more functions to convert among mobility diameter (db), da and dv.
 
-- **sizedist_optimization.py**  
+- **sizedist_alignment.py**  
   Optimization routines that use the bin-remapping functions to align aerosol size distributions and simultaneously retrieve aerosol properties (e.g., **refractive index**, **density**, etc.)  
   by minimizing the **mean squared error (MSE)** over overlapping regions of two or more instruments' size distributions.
 

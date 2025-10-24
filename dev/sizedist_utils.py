@@ -105,28 +105,39 @@ def remap_dndlog_by_edges(old_edges_nm, new_edges_nm, dndlogdp):
 
 
 def select_between(m, e, y, s=None, xmin=None, xmax=None):
+    import numpy as np
 
     m = np.asarray(m, dtype=float)
     e = np.asarray(e, dtype=float)
     y = np.asarray(y, dtype=float)
     s_arr = None if s is None else np.asarray(s, dtype=float)
 
+    N = e.size - 1  # number of bins
+
     # Build keep mask using edges (bin is fully inside the clip interval)
-    left_ok  = True if xmin is None else (e[:-1] >= float(xmin))
-    right_ok = True if xmax is None else (e[1:]  <= float(xmax))
-    keep = np.asarray(left_ok & right_ok, dtype=bool)
+    if xmin is None:
+        left_ok = np.ones(N, dtype=bool)
+    else:
+        left_ok = (e[:-1] >= float(xmin))
+
+    if xmax is None:
+        right_ok = np.ones(N, dtype=bool)
+    else:
+        right_ok = (e[1:] <= float(xmax))
+
+    keep = left_ok & right_ok  # shape (N,)
 
     if not np.any(keep):
         empty = np.array([], dtype=float)
         return empty, empty, empty, (None if s is None else empty)
 
     # Indices of the contiguous kept block (it will be contiguous for a simple interval)
-    i0 = int(np.argmax(keep))              # first kept bin
-    i1 = int(np.where(keep)[0][-1])        # last  kept bin
+    i0 = int(np.argmax(keep))           # first kept bin
+    i1 = int(np.where(keep)[0][-1])     # last kept bin
 
     m_out = m[keep]
     y_out = y[keep]
     s_out = None if s is None else s_arr[keep]
-    e_out = e[i0 : i1 + 2]                 # crop edges to bound the kept bins
+    e_out = e[i0 : i1 + 2]              # crop edges to bound the kept bins
 
     return m_out, e_out, y_out, s_out

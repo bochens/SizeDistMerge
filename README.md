@@ -27,9 +27,9 @@ Python toolkit for merging aerosol size distributions measured by different aero
   - Use pre-computed LUT for speed.
 
 - **diameter-conversion-core.py** 
-Contains `da_to_dv()` to convert aerodynamic diameter (da) to volume equivalent diameter, and is currently used for remapping APS instrument bins based on density and Chi.
+  Contains `da_to_dv()` to convert aerodynamic diameter (da) to volume equivalent diameter, and is currently used for remapping APS instrument bins based on density and Chi.
 
-Will add more functions to convert among mobility diameter (db), da and dv.
+  Will add more functions to convert among mobility diameter (db), da and dv.
 
 - **sizedist_optimization.py**  
   Optimization routines that use the bin-remapping functions to align aerosol size distributions and simultaneously retrieve aerosol properties (e.g., **refractive index**, **density**, etc.)  
@@ -39,14 +39,14 @@ Will add more functions to convert among mobility diameter (db), da and dv.
   Routines to reconstruct a **smooth aerosol size distribution** from multiple instruments onto a common diameter grid.
 
 - **sizedist_utils.py**
-Contains useful helper functions for dealing with aerosol size distribution
+  Contains useful helper functions for dealing with aerosol size distribution
 
 
 ### OPC mie scattering LUT
 
 - **pops_sigma_col_405nm.zarr**  
-Calculated scattering cross-sections for POPS at **405 nm**, indexed by particle diameter and real and imaginary part of refractive index.
+  Calculated scattering cross-sections for POPS at **405 nm**, indexed by particle diameter and real and imaginary part of refractive index.
 
 - **uhsas_sigma_col_1054nm.zarr**  
-Similar dataset for UHSAS at **1054 nm**.
+  Similar dataset for UHSAS at **1054 nm**.
 

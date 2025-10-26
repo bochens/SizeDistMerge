@@ -26,11 +26,12 @@ def K_tophat(fine_edges_log10D: np.ndarray, inst_edges_log10D: np.ndarray) -> np
     K : (N_I, N_f) ndarray
         Overlap-length matrix in log10(D). If y is dN/dlog10D on the fine grid,
         instrument-bin numbers are K @ y.
+
     """
     fine_edges = np.asarray(fine_edges_log10D, float)
     inst_edges = np.asarray(inst_edges_log10D, float)
 
-    n_fine = fine_edges.size - 1
+    n_fine = fine_edges.size - 1 # number of bins
     n_bins = inst_edges.size - 1
     if n_fine <= 0 or n_bins <= 0:
         return np.zeros((0, 0), dtype=float)

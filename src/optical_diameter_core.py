@@ -544,9 +544,16 @@ def convert_do_lut(
     *, response_bins=50, eps=1e-12
 ):
     """
-    Map OPC bins from m_src -> m_dst via σ(D;m). Conserve number exactly:
+    Map OPC bins from ri_src -> ri_dst via σ(D;m). Conserve number exactly:
         N_i' = N_i  for each original bin i
     Then compute dN/dlog10D' on the new edges.
+
+    Args
+    ----
+    Do_nm : optical diameter in nm
+    ri_src: refractive index used for Do_nm
+    ri_dst: destination refractive index associated with the return
+    lut: LUT object
 
     Returns:
         Dp_centers_nm, dNdlog10Dp_new, Dp_edges_nm

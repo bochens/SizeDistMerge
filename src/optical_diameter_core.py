@@ -31,7 +31,8 @@ RI_POPS_SRC =complex(1.615, 0.001)
 # -------------------------------
 
 @dataclass(frozen=True)
-class POPSGeom:
+class POPSGeom: 
+# Gao et al., “A Light-Weight, High-Sensitivity Particle Spectrometer for PM2.5 Aerosol Measurements.”
     ring_theta_min_deg: float = 38.0
     ring_theta_max_deg: float = 143.0
     ring_step_deg:      float = 1.0
@@ -43,7 +44,7 @@ class POPSGeom:
 
 @dataclass(frozen=True)
 class UHSASGeom:
-    # Angular bands you asked for
+# Ultra High Sensitivity Aerosol Spectrometer (UHSAS) Operator Manual DMT
     big_theta_min_deg: float = 33.0
     big_theta_max_deg: float = 147.0
     small_theta_min_deg: float = 75.2
@@ -101,7 +102,6 @@ class _POPSCache:
         self.ring_idx = np.arange(theta_ring_rad.size, dtype=int)  # select ring in (ring+PMT)
 
 def pops_geometry_cache(geom: POPSGeom) -> _POPSCache:
-    # --- your POPS geometry math kept exactly the same ---
     ring_deg = np.arange(geom.ring_theta_min_deg, geom.ring_theta_max_deg,
                          geom.ring_step_deg, dtype=float)
     theta_eval_deg = np.r_[ring_deg, geom.pmt_center_deg]
@@ -200,7 +200,7 @@ def pops_csca(
     return out
 
 
-def pops_csca_parallel(
+def pops_csca_parallel(  # parallel calculation. As in parallel computing, not polarization.
     D_nm,
     m_particle,
     wavelength_nm: float,

@@ -4,9 +4,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/release/python-3137/)
 [![Status](https://img.shields.io/badge/status-in%20development-orange.svg)]()
+[![DOI](https://zenodo.org/badge/1080762946.svg)](https://doi.org/10.5281/zenodo.17459970)
 
 # SizeDistMerge
 Python toolkit for merging aerosol size distributions measured by different aerosol sizing instruments.
+
+If you use this code in your research, please **cite it using the DOI: https://zenodo.org/records/17459971**.
 
 Code currently developed and maintained by [Kreidenweis Research Group](https://chem.atmos.colostate.edu/) at [Colorado State University](https://www.atmos.colostate.edu/). Collaboration welcome—issues and pull requests appreciated.
 

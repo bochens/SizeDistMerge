@@ -190,7 +190,7 @@ def pops_csca(
         dcs = np.pi * (a_um[i]**2) * Pdet # differential scattering cross-section per unit solid angle
 
         if _HAVE_NUMBA:
-            # dphi is the azimuthal acceptance width: delta phi(theta)
+            # dphi is the azimuthal acceptance width delta phi(theta)
             mirror_term = _trapz_weighted_numba(dcs[c.ring_idx], c.dphi, c.theta_ring_rad) # type: ignore[arg-type]
             pmt_term    = dcs[c.i_pmt] * c.omega_pmt
         else:

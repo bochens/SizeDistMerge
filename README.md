@@ -10,6 +10,16 @@ Python toolkit for merging aerosol size distributions measured by different aero
 
 ## Repo Structure
 
+### `notebook/`
+
+- **opc_response_demo.ipynb**
+  Jupyter notebook demo for calculating OPC response function.
+
+- **sizedistmerge_lab.ipynb**
+  Main demo for merging size distribution data (using NASA icartt data)
+
+- **twomey_lab.ipynb**
+  Experimental testing with twomey implementation
 
 ### `src/`
 

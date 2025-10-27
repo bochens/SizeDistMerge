@@ -56,7 +56,7 @@ Python toolkit for merging aerosol size distributions measured by different aero
 - **twomey_inversion.py** (testing)
   main Twomey inversion code
 
-### OPC mie scattering LUT
+### `lut/`
 
 - **pops_sigma_col_405nm.zarr**  
   Calculated scattering cross-sections for POPS at **405 nm**, indexed by particle diameter and real and imaginary part of refractive index.

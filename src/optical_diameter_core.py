@@ -178,19 +178,20 @@ def pops_csca(
     Geometry (Δφ, μ, θ-grid) pulled from cache.
     """
     D_nm = np.atleast_1d(D_nm).astype(float)
-    a_um = 0.5 * D_nm * 1e-3
+    a_um = 0.5 * D_nm * 1e-3   # radius in um
     c = _cache or pops_geometry_cache(geom)
 
     out = np.empty_like(D_nm, float)
     for i, D in enumerate(D_nm):
-        xsize = 2.0 * np.pi * (0.5 * D / wavelength_nm)
+        xsize = np.pi * (D / wavelength_nm)    # size parameter
         PM = mie.phase_matrix(m_particle, xsize, c.mu, norm="qsca")
         P11, P12 = PM[0,0,:], PM[0,1,:]
         Pdet = 0.5*(P11 - P12)  # perpendicular
-        dcs = np.pi * (a_um[i]**2) * Pdet
+        dcs = np.pi * (a_um[i]**2) * Pdet # differential scattering cross-section per unit solid angle
 
         if _HAVE_NUMBA:
-            mirror_term = _trapz_weighted_numba(dcs[c.ring_idx], c.dphi, c.theta_ring_rad)  # type: ignore[arg-type]
+            # dphi is the azimuthal acceptance width: delta phi(theta)
+            mirror_term = _trapz_weighted_numba(dcs[c.ring_idx], c.dphi, c.theta_ring_rad) # type: ignore[arg-type]
             pmt_term    = dcs[c.i_pmt] * c.omega_pmt
         else:
             mirror_term = np.trapz(dcs[c.ring_idx] * c.dphi, c.theta_ring_rad)
@@ -238,7 +239,7 @@ def uhsas_csca(
 
     out = np.empty_like(D_nm, float)
     for i, D in enumerate(D_nm):
-        xsize = 2.0 * np.pi * (0.5 * D / wavelength_nm)
+        xsize = np.pi * (D / wavelength_nm)
 
         # BIG ring
         PMb = mie.phase_matrix(m_particle, xsize, c.mu_big, norm="qsca")

@@ -505,7 +505,7 @@ def read_ict_file(
                 df = df.iloc[[i]].copy()
         else:
             if t0_utc is not None: df = df[df["time"] >= t0_utc]
-            if t1_utc is not None: df = df[df["time"] <= t1_utc]
+            if t1_utc is not None: df = df[df["time"] < t1_utc]
 
     if make_index and "time" in df.columns:
         df = df.set_index("time")
@@ -957,9 +957,12 @@ def mean_spectrum(
     mean_vals = dnd[cols].mean(axis=0, skipna=True).to_numpy()
     sigma_vals = dnd[cols].std(axis=0, ddof=ddof, skipna=True).to_numpy()
 
+    # non-NaN count per bin (how many data points used)
+    n_vals = dnd[cols].count(axis=0).to_numpy(dtype=int)
+
     # sort by diameter midpoints
     order = np.argsort(mids)
-    return mids[order], mean_vals[order], sigma_vals[order], label
+    return mids[order], mean_vals[order], sigma_vals[order], label, n_vals[order]
 
 def check_meta(label, df):
     meta = (df.attrs.get("bin_meta") or {})

@@ -46,6 +46,7 @@ def plot_size_distributions(
     fig: plt.Figure | None = None,
     ax: plt.Axes | None = None,
     axf: plt.Axes | None = None,
+    figsize = (8, 6),
 ):
     """
     Plot mean ±1σ size distributions as regular lines.
@@ -64,11 +65,11 @@ def plot_size_distributions(
     else:
         if show_flag_strip:
             fig, (ax, axf) = plt.subplots(
-                2, 1, figsize=(8, 6),
+                2, 1, figsize=figsize,
                 gridspec_kw={"height_ratios":[4,0.15]}, sharex=False
             )
         else:
-            fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+            fig, ax = plt.subplots(1, 1, figsize=figsize)
             axf = None
 
     ax.set_xscale("log")
@@ -163,6 +164,7 @@ def plot_size_distributions_steps(
     fig: plt.Figure | None = None,
     ax: plt.Axes | None = None,
     axf: plt.Axes | None = None,
+    figsize = (8, 6),
 ):
     """
     Plot mean ±1σ size distributions as step histograms with edge-aligned uncertainty.
@@ -178,11 +180,11 @@ def plot_size_distributions_steps(
     else:
         if show_flag_strip:
             fig, (ax, axf) = plt.subplots(
-                2, 1, figsize=(8, 6),
+                2, 1, figsize=figsize,
                 gridspec_kw={"height_ratios":[4,0.15]}, sharex=False
             )
         else:
-            fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+            fig, ax = plt.subplots(1, 1, figsize=figsize)
             axf = None
 
     ax.set_xscale("log")

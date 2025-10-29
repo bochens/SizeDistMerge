@@ -641,12 +641,46 @@ def read_ict_dir(
     pattern: str = "*.ict",
     **kwargs,
 ) -> pd.DataFrame:
-    """Read all files matching `pattern` in a directory and concatenate (via read_ict)."""
+    """Read all files matching `pattern` in a directory and concatenate."""
     root = Path(root)
     if not root.is_dir():
         raise FileNotFoundError(f"No such directory: {root}")
-    paths = sorted(root.glob(pattern))
-    return read_ict(paths, **kwargs)
+    files = sorted(root.glob(pattern))
+    if not files:
+        return pd.DataFrame()
+
+    # Defaults consistent with read_ict
+    start = kwargs.pop("start", None)
+    end = kwargs.pop("end", None)
+    tz = kwargs.pop("tz", "UTC")
+    keep_time_col = kwargs.pop("keep_time_col", False)
+    make_index = kwargs.pop("make_index", True)
+    standardize_bins = kwargs.pop("standardize_bins", False)
+    col_prefix = kwargs.pop("col_prefix", "dNdlogDp")
+
+    df = _read_multi(
+        files,
+        start=start,
+        end=end,
+        tz=tz,
+        keep_time_col=True,         # keep for now, drop below if requested
+        make_index=False,
+        standardize_bins=standardize_bins,
+        col_prefix=col_prefix,
+    )
+    df = _ensure_time_column(df, want_column=not make_index)
+    if "time" in df.columns:
+        df = df.sort_values("time")
+    elif isinstance(df.index, pd.DatetimeIndex):
+        df = df.sort_index()
+    if make_index:
+        df = _ensure_time_column(df, want_column=False)
+    if not keep_time_col:
+        for c in ("Time_Mid", "Time_Start"):
+            if c in df.columns:
+                df = df.drop(columns=[c])
+                break
+    return df
 
 # ─────────────────────────────── Spectra APIs ───────────────────────────────
 
@@ -1213,10 +1247,11 @@ def flag_segments(series: pd.Series):
     return list(zip(starts, ends, vals))
 
 def flag_fractions(segments):
+    """Return {flag_value: fraction_of_total_duration}."""
     tot = sum((t1 - t0).total_seconds() for t0, t1, _ in segments)
     if tot <= 0:
         return {}
-    acc = {}
-    for t0, t1, v in segments:
-        acc[v] = acc.get(v, 0.0) + (t1 - t0).total_seconds()
-        return {k: v / tot for k, v in acc.items()}
+    acc: Dict[int, float] = {}
+    for t0, t1, val in segments:
+        acc[val] = acc.get(val, 0.0) + (t1 - t0).total_seconds()
+    return {val: dur / tot for val, dur in acc.items()}

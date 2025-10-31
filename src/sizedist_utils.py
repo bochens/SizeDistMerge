@@ -103,9 +103,61 @@ def remap_dndlog_by_edges(old_edges_nm, new_edges_nm, dndlogdp):
 
     return dndlogdp_new
 
+def remap_dndlog_by_edges_any(old_edges_nm, new_edges_nm, dndlogdp, *, min_coverage=0.999):
+
+    old_edges_nm = np.asarray(old_edges_nm, float)
+    new_edges_nm = np.asarray(new_edges_nm, float)
+    dndlogdp     = np.asarray(dndlogdp, float)
+
+    dlog_old   = np.diff(np.log10(old_edges_nm))
+    counts_old = dndlogdp * dlog_old
+
+    n_old = len(dndlogdp)
+    n_new = len(new_edges_nm) - 1
+    counts_new   = np.zeros(n_new, float)
+    covered_logw = np.zeros(n_new, float)      # <<< NEW
+
+    i_old = 0
+    for j in range(n_new):
+        a0 = new_edges_nm[j]
+        a1 = new_edges_nm[j+1]
+        log_a0 = np.log10(a0)
+        log_a1 = np.log10(a1)
+        while i_old < n_old:
+            b0 = old_edges_nm[i_old]
+            b1 = old_edges_nm[i_old+1]
+
+            if b1 <= a0:
+                i_old += 1
+                continue
+            if b0 >= a1:
+                break
+
+            lo = max(a0, b0)
+            hi = min(a1, b1)
+            log_lo = np.log10(lo)
+            log_hi = np.log10(hi)
+
+            frac = (log_hi - log_lo) / (np.log10(b1) - np.log10(b0))
+            frac = max(0.0, min(1.0, frac))
+            counts_new[j]   += counts_old[i_old] * frac
+            covered_logw[j] += (log_hi - log_lo)  # <<< NEW
+
+            if b1 <= a1:
+                i_old += 1
+            else:
+                break
+
+    dlog_new = np.diff(np.log10(new_edges_nm))
+    dndlogdp_new = counts_new / dlog_new
+
+    coverage_frac = covered_logw / dlog_new     # <<< NEW
+    dndlogdp_new[coverage_frac < min_coverage] = np.nan  # <<< NEW
+
+    return dndlogdp_new
+
 
 def select_between(m, e, y, s=None, xmin=None, xmax=None):
-    import numpy as np
 
     m = np.asarray(m, dtype=float)
     e = np.asarray(e, dtype=float)
@@ -141,3 +193,4 @@ def select_between(m, e, y, s=None, xmin=None, xmax=None):
     e_out = e[i0 : i1 + 2]              # crop edges to bound the kept bins
 
     return m_out, e_out, y_out, s_out
+

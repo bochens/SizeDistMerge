@@ -33,6 +33,7 @@ __all__ = [
     "read_fims",
     "read_nmass",
     "read_inlet_flag",
+    "read_microphysical",
     # Bins / spectra
     "label_size_bins",
     "get_spectra",
@@ -929,6 +930,12 @@ def read_inlet_flag(path_or_dir: PathLike, **kwargs) -> pd.DataFrame:
     kwargs.setdefault("standardize_bins", False)
     return read_ict(path_or_dir, **kwargs)
 
+def read_microphysical(path_or_dir: PathLike, **kwargs) -> pd.DataFrame:
+    """Microphysical (LARGE platform). No bin standardization."""
+    kwargs.setdefault("instrument", "LARGE-MICROPHYSICAL")
+    kwargs.setdefault("standardize_bins", False)
+    return read_ict(path_or_dir, **kwargs)
+
 # ───────────────────────────── Optional utilities ───────────────────────────
 
 def number_to_surface_area_spectrum(mids_nm, dNdlogDp, frac_sigma, unit="um"):
@@ -1169,57 +1176,68 @@ def align_to_common_grid(
 
     return aligned, grid
 
-
 def filter_by_spectra_presence(
     frames: Dict[str, pd.DataFrame],
     *,
     col_prefix: str = "dNdlogDp",
-    min_instruments: Optional[int] = None,      # default = require all
+    min_instruments: Optional[int] = None,      # default ⇒ require all *spectral* instruments
     extra_masks: Optional[Dict[str, pd.Series]] = None,  # e.g., {"FIMS": fims_qc.ne(2)}
     treat_nonpositive_as_nan: bool = False,
 ) -> Tuple[Dict[str, pd.DataFrame], pd.Series]:
     """
-    Keep only timestamps where at least `min_instruments` instruments have **any valid**
-    (finite) size-bin value from get_spectra(..., long=False).
+    Keep only timestamps where at least `min_instruments` *spectral* instruments have any
+    finite size-bin value from get_spectra(..., long=False). Non-spectral frames (e.g., CPC)
+    are ignored when computing the keep mask but are still filtered to the kept times.
     """
     if not frames:
         raise ValueError("No frames provided.")
-    keys = list(frames.keys())
 
-    # Build the union time index
+    # Union time index across ALL frames (including CPC)
     union_idx = None
     for df in frames.values():
         union_idx = df.index if union_idx is None else union_idx.union(df.index)
     if union_idx is None:
         union_idx = pd.DatetimeIndex([], tz="UTC")
 
-    # Determine per-instrument "has data" masks reindexed to the union
-    has_data = {}
+    # Determine which frames are spectral (have non-empty spectra)
+    spectral_keys: List[str] = []
+    spectra_cache: Dict[str, pd.DataFrame] = {}
     for k, df in frames.items():
         _, spec_df = get_spectra(df, col_prefix=col_prefix, long=False)
-        if spec_df.empty:
-            m = pd.Series(False, index=df.index)
-        else:
-            A = spec_df.to_numpy(dtype=float)
-            if treat_nonpositive_as_nan:
-                A = np.where(A > 0, A, np.nan)
-            m = pd.Series(~np.all(~np.isfinite(A), axis=1), index=spec_df.index)
+        spectra_cache[k] = spec_df
+        if not spec_df.empty:
+            spectral_keys.append(k)
+
+    # Build has-data mask table ONLY over spectral instruments
+    has_data: Dict[str, pd.Series] = {}
+    for k in spectral_keys:
+        spec_df = spectra_cache[k]
+        A = spec_df.to_numpy(dtype=float)
+        if treat_nonpositive_as_nan:
+            A = np.where(A > 0, A, np.nan)
+        m = pd.Series(~np.all(~np.isfinite(A), axis=1), index=spec_df.index)
         has_data[k] = m.reindex(union_idx, fill_value=False).astype(bool)
 
-    mask_table = pd.DataFrame(has_data).astype(bool)
+    mask_table = pd.DataFrame(has_data, index=union_idx).astype(bool)
 
-    # AND in optional extra masks (e.g., QC_Flag constraints), reindexed to union
+    # AND any extra masks (applied only where the key exists in mask_table)
     if extra_masks:
         for k, extra in extra_masks.items():
             if k in mask_table:
                 mask_table[k] = mask_table[k] & extra.reindex(union_idx).fillna(False).astype(bool)
 
+    # Default threshold = number of *spectral* instruments
     if min_instruments is None:
-        min_instruments = len(frames)
+        min_needed = len(spectral_keys)
+    else:
+        min_needed = min(int(min_instruments), len(spectral_keys))
 
-    keep_mask = mask_table.sum(axis=1) >= int(min_instruments)
+    if len(spectral_keys) == 0:
+        # No spectral instruments → keep everything (don’t let CPC erase data)
+        keep_mask = pd.Series(True, index=union_idx)
+    else:
+        keep_mask = mask_table.sum(axis=1) >= min_needed
 
-    # Filter each frame to its intersection with kept times (per-own index)
     kept_index = union_idx[keep_mask]
     filtered = {k: frames[k].loc[frames[k].index.intersection(kept_index)] for k in frames}
     return filtered, keep_mask

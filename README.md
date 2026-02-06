@@ -26,6 +26,9 @@ Code currently developed and maintained by [Kreidenweis Research Group](https://
 - **twomey_lab.ipynb**
   Experimental testing with twomey implementation
 
+- **batch_merging_lab.ipynb**
+  Jupyter notebook for executing the **merge_production.py** pipeline specifically for the NASA ARCSIX campaign. Creates data production logs, error logs, diagnostic figures (optimization loss curves, merge plots, and time series), and the merged size distribution output in .netcdf files. Also contains a QC procedure to flag merged size distribution based on a comparison with CPC measurements.
+
 ### `src/`
 
 - **optical_diameter_core.py**  

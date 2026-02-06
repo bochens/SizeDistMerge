@@ -55,6 +55,9 @@ Code currently developed and maintained by [Kreidenweis Research Group](https://
 - **sizedist_utils.py**
   Contains useful helper functions for dealing with aerosol size distribution
 
+- **merge_production.py**
+  Contains data production pipeline functions for merging batches of aerosol size distributions. Currently used for airborne campaign measurements.
+
 - **forward_kernel.py** (testing)
   Forward functions for Twomey inversion
 

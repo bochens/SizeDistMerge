@@ -294,55 +294,28 @@ def merge_sizedists_tikhonov(
     Minimizes (in stacked least-squares form):
         || D^{1/2} (M - ybar) ||_2^2 + || sqrt(lam) * Wc^{1/2} L M ||_2^2
     subject to M >= 0 if `nonneg` is True.
-
-    Parameters
-    ----------
-    diam_grid_nm : (n,) array_like
-        Diameter grid [nm].
-    series_list : list of dict
-        Each dict has "x", "y", and optionally "sigma", "alpha".
-    lam : float
-        Smoothness strength λ >= 0.
-    eps : float
-        Variance floor to avoid infinite weights.
-    nonneg : bool
-        If True, enforce M >= 0 via bounded least squares.
-
-    Returns
-    -------
-    merged_vals : (n,) ndarray
-        Merged spectrum on `diam_grid_nm`. Unsupported nodes are NaN.
-    weight_sum : (n,) ndarray
-        Total data weight per node, Σ_i α_i /(σ_ij^2+eps).
-    diagnostics : dict
-        Useful intermediate arrays and solver info:
-          - "support_mask": bool mask where weight_sum > 0
-          - "ybar_supported": per-node weighted mean on support
-          - "sqrt_weight_data": sqrt of per-node weight on support
-          - "L_smooth": second-derivative operator on support
-          - "quad_w": quadrature weights on support
-          - "solver": SciPy result object (status, nit, cost, etc.)
     """
+
     diam_grid_nm = np.asarray(diam_grid_nm, float)
     n_grid = diam_grid_nm.size
     log_grid = np.log10(diam_grid_nm)
 
     # Accumulate inverse-variance weighted sums on the grid
     weighted_sum_y = np.zeros(n_grid, float)   # Σ_i (α_i * w_ij * y_ij)
-    weight_sum = np.zeros(n_grid, float)       # Σ_i (α_i * w_ij)
+    weight_sum     = np.zeros(n_grid, float)   # Σ_i (α_i * w_ij)
 
     for s in series_list:
-        x_nm = s["x"]
-        y_vals = s["y"]
+        x_nm       = np.asarray(s["x"], float)
+        y_vals     = np.asarray(s["y"], float)
         sigma_vals = s.get("sigma", None)
-        alpha = float(s.get("alpha", 1.0))
+        alpha      = float(s.get("alpha", 1.0))
 
         y_on_grid = log_interp(x_nm, y_vals, diam_grid_nm)
 
         if sigma_vals is None:
             inv_var_on_grid = np.ones_like(diam_grid_nm)
         else:
-            sigma_on_grid = log_interp(x_nm, sigma_vals, diam_grid_nm)
+            sigma_on_grid   = log_interp(x_nm, np.asarray(sigma_vals, float), diam_grid_nm)
             inv_var_on_grid = 1.0 / (np.square(sigma_on_grid) + eps)
 
         valid = np.isfinite(y_on_grid) & np.isfinite(inv_var_on_grid)
@@ -350,57 +323,253 @@ def merge_sizedists_tikhonov(
         eff_weight[valid] = alpha * inv_var_on_grid[valid]
 
         weighted_sum_y += eff_weight * np.nan_to_num(y_on_grid, nan=0.0)
-        weight_sum += eff_weight
+        weight_sum     += eff_weight
 
-    # Restrict to nodes with at least one contributing instrument
-    support_mask = weight_sum > 0
-    if support_mask.sum() < 3:
+    # Where do we actually have *any* data?
+    data_mask = weight_sum > 0
+    if data_mask.sum() < 3:
         raise ValueError("merge_sizedists_tikhonov: insufficient supported grid points (<3).")
 
-    grid_supported = diam_grid_nm[support_mask]
-    log_grid_supported = log_grid[support_mask]
-    weight_sum_supported = weight_sum[support_mask]
-    weighted_sum_y_supported = weighted_sum_y[support_mask]
+    tiny = 1e-30
 
-    tiny = 1e-30  # numerical floor
+    # Data term on the FULL grid
+    ybar = np.zeros_like(weighted_sum_y)
+    sqrt_weight_data = np.zeros_like(weight_sum)
 
-    # Data term: D^{1/2}(M - ybar) ≈ 0
-    ybar_supported = weighted_sum_y_supported / np.maximum(weight_sum_supported, tiny)
-    sqrt_weight_data = np.sqrt(np.maximum(weight_sum_supported, tiny))
-    A_data_matrix = np.diag(sqrt_weight_data)               # shape: (ns, ns)
-    rhs_data = sqrt_weight_data * ybar_supported            # shape: (ns,)
+    # Only define ybar, sqrt_weight_data where we have data;
+    # elsewhere these stay 0 => rows contribute nothing to the LS system.
+    ybar[data_mask] = weighted_sum_y[data_mask] / np.maximum(weight_sum[data_mask], tiny)
+    sqrt_weight_data[data_mask] = np.sqrt(np.maximum(weight_sum[data_mask], tiny))
 
-    # Smoothness term on nonuniform log grid: sqrt(lam)*Wc^{1/2}*L*M ≈ 0
-    L_smooth, quad_w = second_diff_nonuniform(log_grid_supported)
-    A_smooth_matrix = np.sqrt(lam) * (np.sqrt(quad_w)[:, None] * L_smooth)
-    rhs_smooth = np.zeros(L_smooth.shape[0], float)
+    A_data_matrix = np.diag(sqrt_weight_data)       # (n, n)
+    rhs_data      = sqrt_weight_data * ybar         # (n,)
 
-    # Stack data and smooth blocks
-    A_stacked = np.vstack([A_data_matrix, A_smooth_matrix])
+    # Smoothness term on FULL nonuniform log grid
+    L_smooth, quad_w = second_diff_nonuniform(log_grid)
+    A_smooth_matrix  = np.sqrt(lam) * (np.sqrt(quad_w)[:, None] * L_smooth)
+    rhs_smooth       = np.zeros(L_smooth.shape[0], float)
+
+    # Stack data + smoothness
+    A_stacked   = np.vstack([A_data_matrix, A_smooth_matrix])
     rhs_stacked = np.concatenate([rhs_data, rhs_smooth])
 
-    # Solve bounded LS: min ||A M - b||_2 subject to bounds
+    # Solve bounded LS on the *full* grid
     lower_bound = 0.0 if nonneg else -np.inf
     upper_bound = np.inf
-    result = lsq_linear(A_stacked, rhs_stacked, bounds=(lower_bound, upper_bound), method="trf")
-    merged_supported = result.x
+    result = lsq_linear(A_stacked, rhs_stacked,
+                        bounds=(lower_bound, upper_bound),
+                        method="trf")
+    merged_full = result.x  # length n_grid
 
-    # Scatter back to full grid; unsupported nodes -> NaN
-    merged_vals = np.full_like(diam_grid_nm, np.nan, dtype=float)
-    merged_vals[support_mask] = merged_supported
+    # Clip to data span: NaN outside [first, last] node with any data
+    merged_vals = merged_full.copy()
+    first = int(np.argmax(data_mask))
+    last  = int(len(data_mask) - 1 - np.argmax(data_mask[::-1]))
+    merged_vals[:first]  = np.nan
+    merged_vals[last+1:] = np.nan
 
     diagnostics = {
-        "support_mask": support_mask,
-        "ybar_supported": ybar_supported,
-        "sqrt_weight_data": sqrt_weight_data,
+        "support_mask": data_mask,          # where there is any data
+        "ybar_supported": ybar[data_mask],  # just for reference
+        "sqrt_weight_data": sqrt_weight_data[data_mask],
         "L_smooth": L_smooth,
         "quad_w": quad_w,
         "solver": result,
     }
+
+    return merged_vals, weight_sum, diagnostics
+
+
+def merge_sizedists_tikhonov_consensus(
+    diam_grid_nm: np.ndarray,
+    series_list: List[Dict[str, Any]],
+    *,
+    lam: float = 1e-6,
+    eps: float = 1e-12,
+    nonneg: bool = True,
+    min_overlap: int = 3,
+    c: float = 2.5,
+    eps_scale: float = 1e-12,
+    data_space: str = "linear",   # "linear" or "log10"
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Like merge_sizedists_tikhonov, but with a per-grid-node "consensus/voting" reweighting.
+
+    NEW:
+    - data_space="linear": do everything in linear y
+    - data_space="log10": do everything in log10(y), then convert merged back to linear y
+
+    In log10 mode:
+    - y <= 0 is treated as missing (ignored): it becomes NaN in solver-space and gets zero weight.
+    - if sigma is provided in linear y units, it is converted to sigma_log10 via:
+          sigma_log10 = sigma / (y * ln(10))
+      Only where y > 0 and sigma > 0; otherwise ignored.
+    - nonneg bound is ignored in log10 mode (since 10**Z is always positive).
+    """
+    if data_space not in ("linear", "log10"):
+        raise ValueError(f"data_space must be 'linear' or 'log10', got: {data_space!r}")
+
+    diam_grid_nm = np.asarray(diam_grid_nm, float)
+    n_grid = diam_grid_nm.size
+    log_grid = np.log10(diam_grid_nm)
+
+    n_series = len(series_list)
+
+    # ---- interpolate all series onto grid ----
+    Y_lin = np.full((n_series, n_grid), np.nan, float)  # always store linear interpolated y
+    Y_use = np.full((n_series, n_grid), np.nan, float)  # solver-space y (linear or log10)
+    W_base = np.zeros((n_series, n_grid), float)        # inverse-variance weights in solver-space
+
+    ln10 = np.log(10.0)
+
+    for i, s in enumerate(series_list):
+        x_nm       = np.asarray(s["x"], float)
+        y_vals     = np.asarray(s["y"], float)
+        sigma_vals = s.get("sigma", None)
+        alpha      = float(s.get("alpha", 1.0))
+
+        y_on_grid = log_interp(x_nm, y_vals, diam_grid_nm)
+        Y_lin[i, :] = y_on_grid
+
+        if data_space == "linear":
+            # ---- fit in linear y ----
+            Y_use[i, :] = y_on_grid
+
+            if sigma_vals is None:
+                valid = np.isfinite(y_on_grid)
+                W_base[i, valid] = alpha * 1.0
+            else:
+                sigma_on_grid = log_interp(x_nm, np.asarray(sigma_vals, float), diam_grid_nm)
+                inv_var = 1.0 / (np.square(sigma_on_grid) + eps)
+                valid = np.isfinite(y_on_grid) & np.isfinite(inv_var)
+                W_base[i, valid] = alpha * inv_var[valid]
+
+        else:
+            # ---- fit in log10(y); ignore y<=0 by treating as missing ----
+            pos = np.isfinite(y_on_grid) & (y_on_grid > 0)
+
+            ylog = np.full(n_grid, np.nan, float)
+            ylog[pos] = np.log10(y_on_grid[pos])
+            Y_use[i, :] = ylog
+
+            if sigma_vals is None:
+                valid = np.isfinite(ylog)
+                W_base[i, valid] = alpha * 1.0
+            else:
+                sigma_on_grid = log_interp(x_nm, np.asarray(sigma_vals, float), diam_grid_nm)
+
+                # only use where y>0 and sigma>0 and finite
+                ok = pos & np.isfinite(sigma_on_grid) & (sigma_on_grid > 0)
+
+                sigma_log = np.full(n_grid, np.nan, float)
+                sigma_log[ok] = sigma_on_grid[ok] / (y_on_grid[ok] * ln10)
+
+                inv_var = 1.0 / (np.square(sigma_log) + eps)
+                valid = np.isfinite(ylog) & np.isfinite(inv_var)
+                W_base[i, valid] = alpha * inv_var[valid]
+
+    # ---- consensus weights per node ----
+    W_cons = np.ones((n_series, n_grid), float)
+
+    for j in range(n_grid):
+        yj = Y_use[:, j]
+        valid = np.isfinite(yj)
+        m = int(np.sum(valid))
+        if m < min_overlap:
+            # not enough overlap -> no extra consensus downweighting
+            W_cons[:, j] = np.where(valid, 1.0, 0.0)
+            continue
+
+        vals = yj[valid]
+        med = np.median(vals)
+
+        mad = np.median(np.abs(vals - med))
+        scale = 1.4826 * mad
+        if not np.isfinite(scale) or scale < eps_scale:
+            scale = eps_scale
+
+        z = (yj - med) / scale
+        w = np.exp(-0.5 * (z / c) ** 2)
+        w[~valid] = 0.0
+        W_cons[:, j] = w
+
+    # ---- effective weights ----
+    W_eff = W_base * W_cons
+
+    # ---- build ybar + weight_sum in solver space ----
+    weighted_sum_y = np.nansum(W_eff * np.nan_to_num(Y_use, nan=0.0), axis=0)
+    weight_sum     = np.sum(W_eff, axis=0)
+
+    data_mask = weight_sum > 0
+    if data_mask.sum() < 3:
+        raise ValueError("merge_sizedists_tikhonov_consensus: insufficient supported grid points (<3).")
+
+    tiny = 1e-30
+    ybar = np.zeros(n_grid, float)
+    sqrt_weight_data = np.zeros(n_grid, float)
+
+    ybar[data_mask] = weighted_sum_y[data_mask] / np.maximum(weight_sum[data_mask], tiny)
+    sqrt_weight_data[data_mask] = np.sqrt(np.maximum(weight_sum[data_mask], tiny))
+
+    A_data_matrix = np.diag(sqrt_weight_data)
+    rhs_data      = sqrt_weight_data * ybar
+
+    # ---- smoothness term on solved variable (linear y or log10(y)) ----
+    L_smooth, quad_w = second_diff_nonuniform(log_grid)
+    A_smooth_matrix  = np.sqrt(lam) * (np.sqrt(quad_w)[:, None] * L_smooth)
+    rhs_smooth       = np.zeros(L_smooth.shape[0], float)
+
+    A_stacked   = np.vstack([A_data_matrix, A_smooth_matrix])
+    rhs_stacked = np.concatenate([rhs_data, rhs_smooth])
+
+    # bounds:
+    if data_space == "linear":
+        lower_bound = 0.0 if nonneg else -np.inf
+        upper_bound = np.inf
+    else:
+        lower_bound = -np.inf
+        upper_bound = np.inf
+
+    result = lsq_linear(
+        A_stacked, rhs_stacked,
+        bounds=(lower_bound, upper_bound),
+        method="trf"
+    )
+    merged_full = result.x  # solver space
+
+    # convert back to linear y if needed
+    if data_space == "log10":
+        merged_full_lin = np.power(10.0, merged_full)
+    else:
+        merged_full_lin = merged_full
+
+    # clip to supported span
+    merged_vals = merged_full_lin.copy()
+    first = int(np.argmax(data_mask))
+    last  = int(len(data_mask) - 1 - np.argmax(data_mask[::-1]))
+    merged_vals[:first]  = np.nan
+    merged_vals[last+1:] = np.nan
+
+    diagnostics = {
+        "support_mask": data_mask,
+        "data_space": data_space,
+        "W_base": W_base,
+        "W_consensus": W_cons,
+        "W_effective": W_eff,
+        "y_on_grid_linear": Y_lin,
+        "y_on_grid_solver": Y_use,
+        "ybar_supported_solver": ybar[data_mask],
+        "sqrt_weight_data": sqrt_weight_data[data_mask],
+        "L_smooth": L_smooth,
+        "quad_w": quad_w,
+        "solver": result,
+    }
+
     return merged_vals, weight_sum, diagnostics
 
 
 # ------------------------------ Module metadata ------------------------------ #
+
 
 __all__ = [
     "log_interp",
@@ -411,3 +580,4 @@ __all__ = [
     "compute_data_weights",
     "merge_sizedists_tikhonov",
 ]
+

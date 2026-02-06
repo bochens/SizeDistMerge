@@ -4,6 +4,8 @@ __pycache__/
 
 .DS_Store
 /Users/C832577250/Research/SizeDistMerge/notebook/time_series_lab.ipynb
-notebook/time_series_lab.ipynb
-notebook/FIMS_investigation.ipynb
-notebook/merge_batch_lab.ipynb
+/notebook/time_series_lab.ipynb
+/notebook/FIMS_investigation.ipynb
+/notebook/merge_batch_lab.ipynb
+/notebook/sizedistmerge_lab_new.ipynb
+

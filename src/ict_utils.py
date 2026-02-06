@@ -1249,20 +1249,45 @@ def find_flag_column(df: pd.DataFrame) -> Optional[str]:
     return cand[0] if cand else None
 
 def flag_segments(series: pd.Series):
-    """Return list of (t0, t1, value) segments where the flag is constant."""
+    """
+    Given a time-indexed flag series, return a list of (t0, t1, value) segments
+    where the flag is constant over [t0, t1].
+
+    Requires DatetimeIndex; raises if not.
+    """
     s = pd.to_numeric(series, errors="coerce").dropna()
     if s.empty:
         return []
+
     s = s.astype(int).sort_index()
-    t = s.index.to_series()
-    v = s.values
-    change = np.r_[True, v[1:] != v[:-1]]
-    starts = t.index[change]
-    vals = v[change]
-    ends = np.r_[starts[1:], t.index[-1]]
-    if len(ends) == 0:
-        ends = np.array([t.index[0] + pd.Timedelta(seconds=1)])
-    return list(zip(starts, ends, vals))
+
+    if not isinstance(s.index, pd.DatetimeIndex):
+        raise TypeError(
+            f"flag_segments expects a DatetimeIndex, got {type(s.index)}"
+        )
+
+    idx = s.index          # keep as DatetimeIndex (pandas Timestamps)
+    vals = s.values        # ints
+
+    segments: list[tuple[pd.Timestamp, pd.Timestamp, int]] = []
+    seg_start = 0
+    seg_val = vals[0]
+
+    # split whenever the flag changes
+    for i in range(1, len(vals)):
+        if vals[i] != seg_val:
+            t0 = idx[seg_start]
+            t1 = idx[i - 1]
+            segments.append((t0, t1, seg_val))
+            seg_start = i
+            seg_val = vals[i]
+
+    # final segment
+    t0 = idx[seg_start]
+    t1 = idx[-1]
+    segments.append((t0, t1, seg_val))
+
+    return segments
 
 def flag_fractions(segments):
     """Return {flag_value: fraction_of_total_duration}."""

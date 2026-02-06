@@ -103,7 +103,7 @@ def remap_dndlog_by_edges(old_edges_nm, new_edges_nm, dndlogdp):
 
     return dndlogdp_new
 
-def remap_dndlog_by_edges_any(old_edges_nm, new_edges_nm, dndlogdp, *, min_coverage=0.999):
+def rebin_dndlog_by_edges_overlap(old_edges_nm, new_edges_nm, dndlogdp, *, min_coverage=0.999):
 
     old_edges_nm = np.asarray(old_edges_nm, float)
     new_edges_nm = np.asarray(new_edges_nm, float)
@@ -156,6 +156,8 @@ def remap_dndlog_by_edges_any(old_edges_nm, new_edges_nm, dndlogdp, *, min_cover
 
     return dndlogdp_new
 
+# --- BACKWARDS-COMPAT ALIAS (old name still works) ---
+remap_dndlog_by_edges_any = rebin_dndlog_by_edges_overlap
 
 def select_between(m, e, y, s=None, xmin=None, xmax=None):
 

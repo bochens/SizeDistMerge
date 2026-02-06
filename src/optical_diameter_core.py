@@ -545,39 +545,69 @@ def convert_do_lut(
     *, response_bins=50, eps=1e-12
 ):
     """
-    Map OPC bins from ri_src -> ri_dst via σ(D;m). Conserve number exactly:
-        N_i' = N_i  for each original bin i
-    Then compute dN/dlog10D' on the new edges.
+    Map a diameter axis (typically OPC bin edges) from ri_src -> ri_dst using the LUT.
 
-    Args
-    ----
-    Do_nm : optical diameter in nm
-    ri_src: refractive index used for Do_nm
-    ri_dst: destination refractive index associated with the return
-    lut: LUT object
+    This function ONLY maps the x-axis (D or edges). It does NOT remap any y-values.
+    Use remap_dndlog_by_edges(old_edges, new_edges, y_old) to conservatively rebin
+    the size distribution onto the mapped edges.
 
-    Returns:
-        Dp_centers_nm, dNdlog10Dp_new, Dp_edges_nm
+    Parameters
+    ----------
+    Do_nm : array-like
+        Diameter grid to map (usually bin edges) [nm], must be strictly increasing and > 0.
+    ri_src, ri_dst : complex
+        Source/destination refractive indices for the optical mapping.
+    lut : SigmaLUT
+        Provides sigma_curve(D, n, k).
+    response_bins : int
+        Binning used inside monotone sigma(D) construction (isotonic regression).
+    eps : float
+        Small positive threshold for sanity checks (used only for validation).
+
+    Returns
+    -------
+    Do_nm_new : ndarray
+        Mapped diameter grid [nm], same shape as Do_nm.
     """
+    Do_nm = np.asarray(Do_nm, float)
+    if Do_nm.ndim != 1:
+        raise ValueError("Do_nm must be 1D")
+    if np.any(Do_nm <= 0) or not np.all(np.diff(Do_nm) > 0):
+        raise ValueError("Do_nm must be strictly increasing and > 0")
 
     # build monotone σ maps on LUT grid
     Dg = np.asarray(lut.Dg, float)
     ns, ks = float(np.real(ri_src)), float(np.imag(ri_src))
     nd, kd = float(np.real(ri_dst)), float(np.imag(ri_dst))
+
     sigma_src = lut.sigma_curve(Dg, ns, ks)
     sigma_dst = lut.sigma_curve(Dg, nd, kd)
 
-    f_src_sigma, _    = make_monotone_sigma_interpolator(Dg, sigma_src, response_bins=response_bins, increasing=True)
-    _, D_of_sigma_dst = make_monotone_sigma_interpolator(Dg, sigma_dst, response_bins=response_bins, increasing=True)
+    f_src_sigma, _    = make_monotone_sigma_interpolator(
+        Dg, sigma_src, response_bins=response_bins, increasing=True
+    )
+    _, D_of_sigma_dst = make_monotone_sigma_interpolator(
+        Dg, sigma_dst, response_bins=response_bins, increasing=True
+    )
 
-    # map edges: D -> σ (at ri_src)
+    # map D -> σ (at ri_src)
     sigma_edges = f_src_sigma(Do_nm)
+    if not np.all(np.isfinite(sigma_edges)) or np.any(sigma_edges <= eps):
+        raise ValueError("Non-finite or non-positive σ encountered; check LUT and monotone fit.")
 
-    # invert: σ -> D' (at m_dst)
+    # invert σ -> D' (at ri_dst)
     Do_nm_new = D_of_sigma_dst(sigma_edges)
+    Do_nm_new = np.asarray(Do_nm_new, float)
+
+    if Do_nm_new.shape != Do_nm.shape:
+        raise ValueError("Mapped diameter grid shape mismatch.")
+    if not np.all(np.isfinite(Do_nm_new)) or np.any(Do_nm_new <= 0):
+        raise ValueError("Mapped diameters contain non-finite or non-positive values.")
+    if not np.all(np.diff(Do_nm_new) > 0):
+        raise ValueError("Mapped diameters are not strictly increasing (check response_bins / LUT).")
 
     return Do_nm_new
-    
+
 
 # -------------------------------
 # Public API

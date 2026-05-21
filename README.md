@@ -44,6 +44,85 @@ The top-level API is intended for reusable size-distribution, diameter,
 optical/LUT, alignment, and merge utilities. Campaign production workflows are
 kept under explicit ARCSIX imports.
 
+## Function And Module Guide
+
+### Size Distribution Utilities
+
+`src/sizedistmerge/utils.py` contains the core helpers for aerosol size
+distributions:
+
+- `edges_from_mids_geometric()` and `mids_from_edges()` convert between bin
+  centers and bin edges.
+- `delta_log10_from_edges()` returns the log-width of each bin.
+- `counts_from_dndlog()` and `dndlog_from_counts()` convert between
+  `dN/dlogDp` and per-bin counts.
+- `remap_dndlog_by_edges()` and `remap_dndlog_by_edges_any()` remap spectra
+  while conserving particle counts.
+- `dsdlog_from_dndlog()` and `dvdlog_from_dndlog()` convert number spectra to
+  surface-area or volume spectra.
+
+### Optical Diameter And LUTs
+
+`src/sizedistmerge/optical_diameter.py` contains the OPC optical response
+tools. It computes the relationship between particle diameter and scattering
+signal using Mie theory, integrated over the instrument collection geometry.
+POPS and UHSAS geometries are implemented.
+
+The same module also builds and reads lookup tables of scattering response
+`sigma(D; m)` as a function of particle diameter and refractive index.
+`make_monotone_sigma_interpolator()` enforces a one-to-one response curve so
+diameter bin edges can be remapped between refractive indices. The main remap
+function is `convert_do_lut()`, which uses precomputed LUTs for speed.
+
+Packaged LUT paths are provided by `sdm.lut_path("pops")` and
+`sdm.lut_path("uhsas")`.
+
+### Diameter Conversion
+
+`src/sizedistmerge/diameter_conversion.py` contains `da_to_dv()`, which
+converts aerodynamic diameter to volume-equivalent diameter. This is used when
+APS bins need to be remapped based on particle density and dynamic shape
+factor.
+
+### Alignment And Retrieved Parameters
+
+`src/sizedistmerge/alignment.py` contains overlap-cost and optimization
+routines for aligning size distributions. These functions remap bins, compare
+overlapping regions with mean squared error, and retrieve instrument-dependent
+parameters such as refractive index and APS density.
+
+### Merging Onto A Common Grid
+
+`src/sizedistmerge/combine.py` reconstructs a smooth merged aerosol size
+distribution from multiple instruments on a shared diameter grid. It contains
+the Tikhonov and consensus merge helpers.
+
+### ICARTT And Instrument Tables
+
+`src/sizedistmerge/ict_utils.py` reads ICARTT files and instrument tables,
+extracts size-bin metadata, handles spectra columns, aligns time grids, and
+provides shared time helpers. POPS, UHSAS, APS, FIMS, NMASS, inlet flag, and
+microphysical readers live here because those readers are reusable outside
+ARCSIX production.
+
+### Hygroscopicity
+
+`src/sizedistmerge/kappa_kohler.py` contains kappa-Kohler and hygroscopic
+growth utilities.
+
+### Plotting
+
+`src/sizedistmerge/plot.py` contains reusable plotting helpers for aerosol size
+distributions.
+
+### ARCSIX Production Code
+
+`arcsix_production/arcsix_merge_production.py` is loose campaign code, not part
+of the installable package. It contains the ARCSIX-specific production workflow:
+directory conventions, the FIMS/UHSAS/POPS/APS production combination,
+inlet/cloud filtering, batch logs, diagnostic plots, NetCDF writing,
+post-merge QC, and ICARTT conversion.
+
 ## ARCSIX Production Workflow
 
 ARCSIX batch production, post-merge QC, and ICARTT conversion are kept as

@@ -1,14 +1,13 @@
-# sizedist_alignment.py
-# Minimal, generic optimizer for refractive index (n, k) using an OPC σ-LUT remap.
+"""Alignment and optimization helpers for overlapping size distributions."""
+
 from __future__ import annotations
 from typing import List, Dict, Tuple, Callable
 import numpy as np
 from sklearn.metrics import mean_squared_error
 from scipy.optimize import differential_evolution
 
-from .utils import remap_dndlog_by_edges, mids_from_edges  # number-conserving remap + mids
-from .optical_diameter import SigmaLUT, convert_do_lut  # remaps EDGES via sigma(D; m)
-from .diameter_conversion import da_to_dv  # APS-style diameter conversion
+from .utils import remap_dndlog_by_edges, mids_from_edges
+from .optical_diameter import SigmaLUT, convert_do_lut
 
 
 __all__ = [

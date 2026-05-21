@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import subprocess
 import sys
@@ -8,12 +9,28 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+ARCSIX_PRODUCTION = ROOT / "arcsix_production" / "arcsix_merge_production.py"
+
+
+def load_arcsix_production_module():
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    spec = importlib.util.spec_from_file_location(
+        "arcsix_merge_production", ARCSIX_PRODUCTION
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_import_sizedistmerge_from_outside_repo(tmp_path):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC)
     code = """
+import importlib.util
 import sys
 import sizedistmerge as sdm
 assert "miepython" not in sys.modules
@@ -29,10 +46,10 @@ assert callable(sdm.temporal_parameter_penalty)
 assert callable(sdm.objective_joint_named_temporal)
 assert callable(sdm.number_to_surface_area_spectrum)
 assert not hasattr(sdm, "twomey_inversion")
-assert callable(sdm.arcsix_merge_production.run_arcsix_merge_for_periods)
-assert callable(sdm.arcsix_merge_production.run_post_merge_product_qc)
 assert not hasattr(sdm, "merge_production")
 assert not hasattr(sdm, "arcsix_product")
+assert "arcsix_merge_production" not in sdm.__all__
+assert importlib.util.find_spec("sizedistmerge.arcsix_merge_production") is None
 assert sdm.lut_path("uhsas").name == "uhsas_sigma_col_1054nm.zarr"
 assert sdm.lut_path("pops").name == "pops_sigma_col_405nm.zarr"
 assert "sizedistmerge/data/lut" in sdm.lut_path("uhsas").as_posix()
@@ -82,10 +99,12 @@ def test_package_has_no_twomey_module():
 
 def test_arcsix_merge_production_has_single_canonical_api():
     sys.path.insert(0, str(SRC))
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
-    assert "as_timezone_naive_timestamp" in mp.__all__
-    assert "drop_timezone_from_index" in mp.__all__
+    assert "as_timezone_naive_timestamp" not in mp.__all__
+    assert "drop_timezone_from_index" not in mp.__all__
+    assert "read_arcsix_merge_instruments_for_day" not in mp.__all__
+    assert "read_arcsix_aps_fims_for_day" not in mp.__all__
     assert "load_arcsix_merge_frames_for_day" in mp.__all__
     assert "periods_from_frames" in mp.__all__
     assert "run_post_merge_product_qc" in mp.__all__
@@ -102,7 +121,9 @@ def test_arcsix_merge_production_has_single_canonical_api():
     assert not hasattr(mp, "run_arcsix_merge_for_periods_fims_uhsas_aps")
     assert not hasattr(mp, "run_arcsix_merge_for_periods_fims_aps_only")
 
-    source = (SRC / "sizedistmerge" / "arcsix_merge_production.py").read_text()
+    production_path = ARCSIX_PRODUCTION
+    assert production_path.exists()
+    source = production_path.read_text()
     assert "_v2" not in source
     assert "BASE_DIR" not in source
 
@@ -110,19 +131,25 @@ def test_arcsix_merge_production_has_single_canonical_api():
 def test_arcsix_production_has_no_compatibility_modules():
     assert not (SRC / "sizedistmerge" / "merge_production.py").exists()
     assert not (SRC / "sizedistmerge" / "arcsix_product.py").exists()
+    assert not (SRC / "sizedistmerge" / "arcsix_merge_production.py").exists()
+    assert ARCSIX_PRODUCTION.exists()
+    assert not (ARCSIX_PRODUCTION.parent / "__init__.py").exists()
+    assert not (
+        SRC / "sizedistmerge" / "pipelines" / "arcsix" / "arcsix_merge_production.py"
+    ).exists()
 
 
-def test_arcsix_time_helpers_strip_timezone_without_clock_shift():
+def test_public_time_helpers_strip_timezone_without_clock_shift():
     sys.path.insert(0, str(SRC))
     import pandas as pd
-    from sizedistmerge import arcsix_merge_production as mp
+    import sizedistmerge as sdm
 
-    ts = mp.as_timezone_naive_timestamp("2024-08-02 11:09:37-06:00")
+    ts = sdm.as_timezone_naive_timestamp("2024-08-02 11:09:37-06:00")
     assert ts == pd.Timestamp("2024-08-02 11:09:37")
 
     idx = pd.DatetimeIndex(["2024-08-02 11:09:37-06:00", "2024-08-02 11:09:38-06:00"])
     df = pd.DataFrame({"x": [1, 2]}, index=idx)
-    out = mp.drop_timezone_from_index(df)
+    out = sdm.drop_timezone_from_index(df)
 
     assert out.index.tz is None
     assert out.index.tolist() == [
@@ -134,7 +161,7 @@ def test_arcsix_time_helpers_strip_timezone_without_clock_shift():
 def test_arcsix_period_helpers_reuse_existing_split_behavior():
     sys.path.insert(0, str(SRC))
     import pandas as pd
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     fims = pd.DataFrame(
         {"x": [1, 2, 3]},
@@ -167,12 +194,12 @@ def test_arcsix_period_helpers_reuse_existing_split_behavior():
 def test_load_arcsix_merge_frames_for_day_applies_dirs_timezone_and_fims_lag(monkeypatch, tmp_path):
     sys.path.insert(0, str(SRC))
     import pandas as pd
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     captured = {}
     idx = pd.DatetimeIndex(["2024-08-02 11:00:10-06:00", "2024-08-02 11:00:20-06:00"])
 
-    def fake_load(date, aps_dir, uhsas_dir, fims_dir, pops_dir=None):
+    def fake_load(date, aps_dir, fims_dir, *, uhsas_dir=None, pops_dir=None):
         captured["date"] = date
         captured["aps_dir"] = aps_dir
         captured["uhsas_dir"] = uhsas_dir
@@ -183,7 +210,7 @@ def test_load_arcsix_merge_frames_for_day_applies_dirs_timezone_and_fims_lag(mon
             "APS": pd.DataFrame({"x": [3, 4]}, index=idx),
         }
 
-    monkeypatch.setattr(mp, "load_aufi_oneday", fake_load)
+    monkeypatch.setattr(mp, "read_arcsix_merge_instruments_for_day", fake_load)
 
     frames = mp.load_arcsix_merge_frames_for_day(
         tmp_path,
@@ -465,7 +492,7 @@ def test_optimize_multi_custom_skips_temporal_when_nothing_overlaps(monkeypatch)
 
 def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
     sys.path.insert(0, str(SRC))
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     edges = np.array([10.0, 20.0, 40.0])
     mids = np.array([14.14213562, 28.28427125])
@@ -543,7 +570,7 @@ def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
 
 def test_run_joint_optimization_handles_fims_uhsas_aps_without_pops(monkeypatch):
     sys.path.insert(0, str(SRC))
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     edges = np.array([10.0, 20.0, 40.0])
     mids = np.array([14.14213562, 28.28427125])
@@ -614,7 +641,7 @@ def test_run_joint_optimization_handles_fims_uhsas_aps_without_pops(monkeypatch)
 
 def test_run_joint_optimization_can_override_pops_ri_source(monkeypatch):
     sys.path.insert(0, str(SRC))
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     edges = np.array([10.0, 20.0, 40.0])
     mids = np.array([14.14213562, 28.28427125])
@@ -660,7 +687,7 @@ def test_run_joint_optimization_can_override_pops_ri_source(monkeypatch):
 
 def test_arcsix_instrument_selection_is_configurable():
     sys.path.insert(0, str(SRC))
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     assert mp._normalize_merge_instruments(None, include_pops=True) == ("FIMS", "UHSAS", "POPS", "APS")
     assert mp._normalize_merge_instruments(None, include_pops=False) == ("FIMS", "UHSAS", "APS")
@@ -688,7 +715,7 @@ def test_arcsix_period_runner_carries_temporal_params(monkeypatch, tmp_path):
     sys.path.insert(0, str(SRC))
     import matplotlib.pyplot as plt
     import pandas as pd
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     idx = pd.date_range("2024-05-28 00:00:00.500", periods=4, freq="30s")
     frames = {
@@ -710,7 +737,7 @@ def test_arcsix_period_runner_carries_temporal_params(monkeypatch, tmp_path):
     captured_consensus_kwargs = {}
     written = {}
 
-    monkeypatch.setattr(mp, "load_aufi_oneday", lambda *_args, **_kwargs: {k: v.copy() for k, v in frames.items()})
+    monkeypatch.setattr(mp, "read_arcsix_merge_instruments_for_day", lambda *_args, **_kwargs: {k: v.copy() for k, v in frames.items()})
     monkeypatch.setattr(
         mp,
         "read_inlet_flag",
@@ -827,7 +854,7 @@ def test_arcsix_period_runner_carries_temporal_params(monkeypatch, tmp_path):
 
 def test_temporal_regularization_requires_explicit_prior(monkeypatch):
     sys.path.insert(0, str(SRC))
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     edges = np.array([10.0, 20.0, 40.0])
     mids = np.array([14.14213562, 28.28427125])
@@ -861,7 +888,7 @@ def test_arcsix_period_runner_raises_after_chunk_errors(monkeypatch, tmp_path):
     sys.path.insert(0, str(SRC))
     import matplotlib.pyplot as plt
     import pandas as pd
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     idx = pd.date_range("2024-05-28 00:00:00.500", periods=2, freq="30s")
     frames = {
@@ -879,7 +906,7 @@ def test_arcsix_period_runner_raises_after_chunk_errors(monkeypatch, tmp_path):
         "APS": (mids, edges, y, sigma),
     }
 
-    monkeypatch.setattr(mp, "load_aufi_oneday", lambda *_args, **_kwargs: {k: v.copy() for k, v in frames.items()})
+    monkeypatch.setattr(mp, "read_arcsix_merge_instruments_for_day", lambda *_args, **_kwargs: {k: v.copy() for k, v in frames.items()})
     monkeypatch.setattr(
         mp,
         "read_inlet_flag",
@@ -929,7 +956,7 @@ def test_fims_aps_only_writes_selected_fims_spectrum(monkeypatch, tmp_path):
     sys.path.insert(0, str(SRC))
     import matplotlib.pyplot as plt
     import pandas as pd
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     idx = pd.date_range("2024-05-28 00:00:00.500", periods=2, freq="30s")
     frames = {
@@ -947,7 +974,7 @@ def test_fims_aps_only_writes_selected_fims_spectrum(monkeypatch, tmp_path):
     captured = {}
     written = {}
 
-    monkeypatch.setattr(mp, "load_af_oneday", lambda *_args, **_kwargs: {k: v.copy() for k, v in frames.items()})
+    monkeypatch.setattr(mp, "read_arcsix_aps_fims_for_day", lambda *_args, **_kwargs: {k: v.copy() for k, v in frames.items()})
     monkeypatch.setattr(
         mp,
         "read_inlet_flag",
@@ -1019,7 +1046,7 @@ def test_fims_aps_only_writes_selected_fims_spectrum(monkeypatch, tmp_path):
 def test_write_day_netcdf_uses_canonical_name_and_pops_variables(tmp_path):
     sys.path.insert(0, str(SRC))
     from netCDF4 import Dataset
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     edges = np.array([10.0, 20.0, 40.0])
     vals = np.array([[1.0, 2.0]])
@@ -1060,7 +1087,7 @@ def test_write_day_netcdf_uses_canonical_name_and_pops_variables(tmp_path):
 def test_write_day_netcdf_omits_pops_variables_when_pops_is_absent(tmp_path):
     sys.path.insert(0, str(SRC))
     from netCDF4 import Dataset
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     edges = np.array([10.0, 20.0, 40.0])
     vals = np.array([[1.0, 2.0]])
@@ -1095,7 +1122,7 @@ def test_post_merge_qc_and_icartt_conversion_use_packaged_workflow(monkeypatch, 
     sys.path.insert(0, str(SRC))
     import pandas as pd
     from netCDF4 import Dataset
-    from sizedistmerge import arcsix_merge_production as mp
+    mp = load_arcsix_production_module()
 
     day_dir = tmp_path / "merge" / "2024-05-28"
     day_dir.mkdir(parents=True)

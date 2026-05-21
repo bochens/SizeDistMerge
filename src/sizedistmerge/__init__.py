@@ -94,6 +94,9 @@ _MODULE_EXPORTS = {
         "read_ict_dir",
         "pick_ict_files",
         "parse_bound",
+        "as_timezone_naive_timestamp",
+        "timezone_naive_index",
+        "drop_timezone_from_index",
         "read_aps",
         "read_pops",
         "read_uhsas",
@@ -122,9 +125,7 @@ _MODULE_EXPORTS = {
     ),
 }
 
-_SUBMODULES = tuple(_MODULE_EXPORTS) + (
-    "arcsix_merge_production",
-)
+_SUBMODULES = tuple(_MODULE_EXPORTS)
 _EXPORT_TO_MODULE = {
     export: module_name
     for module_name, exports in _MODULE_EXPORTS.items()

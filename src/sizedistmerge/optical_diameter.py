@@ -11,7 +11,6 @@ def _configure_miepython_jit() -> None:
 _configure_miepython_jit()
 
 from dataclasses import dataclass
-from typing import Union
 import time
 import numpy as np
 import miepython as mie

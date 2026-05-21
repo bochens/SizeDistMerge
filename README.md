@@ -46,11 +46,19 @@ kept under explicit ARCSIX imports.
 
 ## ARCSIX Production Workflow
 
-ARCSIX batch production, post-merge QC, and ICARTT conversion live in one
-campaign module:
+ARCSIX batch production, post-merge QC, and ICARTT conversion are kept as
+loose campaign code outside the installable package:
 
 ```python
-from sizedistmerge import arcsix_merge_production as mp
+from pathlib import Path
+import importlib.util
+import sys
+
+production_path = Path("arcsix_production/arcsix_merge_production.py").resolve()
+spec = importlib.util.spec_from_file_location("arcsix_merge_production", production_path)
+mp = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mp
+spec.loader.exec_module(mp)
 
 mp.run_arcsix_merge_for_periods(...)
 mp.run_post_merge_product_qc(...)
@@ -58,9 +66,14 @@ mp.convert_qc_netcdf_to_icartt(...)
 ```
 
 The current package notebook
-`notebook/arcsix_merge_1min_5min_package.ipynb` shows the 5-minute and
+`notebooks/arcsix_merge_1min_5min_package.ipynb` shows the 5-minute and
 1-minute ARCSIX recipes using the packaged API. The notebook keeps run-specific
 settings visible, while reusable mechanics live in `.py` modules.
+
+Small data-free API demos are in:
+
+- `notebooks/size_distribution_core_demo.ipynb`
+- `notebooks/optics_lut_demo.ipynb`
 
 ## Package Layout
 
@@ -72,14 +85,15 @@ The import package is under `src/sizedistmerge/`:
 - `optical_diameter.py` - POPS/UHSAS Mie-response geometry, LUT builders, and optical diameter remapping.
 - `alignment.py` - MSE overlap objectives, RI/density optimization, and temporal regularization helpers.
 - `combine.py` - Tikhonov and consensus merge routines on common grids.
-- `ict_utils.py` - ICARTT readers and instrument-specific ARCSIX data readers.
+- `ict_utils.py` - ICARTT readers, instrument table helpers, and shared time handling.
 - `plot.py` - size-distribution plotting helpers.
-- `arcsix_merge_production.py` - ARCSIX merge runner, product QC, and ICARTT writer.
 - `resources.py` - package-data lookup helpers such as `sdm.lut_path(...)`.
 
 Old flat scripts are stored separately under `legacy_src_storage/` for
-reference. New code should import from `sizedistmerge` or from
-`sizedistmerge.arcsix_merge_production`.
+reference. Old exploratory notebooks are kept locally under
+`legacy_notebooks/` and are intentionally ignored by git. New code should
+import reusable utilities from `sizedistmerge`. ARCSIX campaign production
+lives outside the package in `arcsix_production/arcsix_merge_production.py`.
 
 ## Packaged LUT Data
 

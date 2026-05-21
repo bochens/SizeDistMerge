@@ -1,13 +1,4 @@
-# src/ict_utility.py
-# Generic ICARTT/ICT utilities — identical functionality to your previous module,
-# but with "arcsix" removed from names and text.
-#
-# Highlights:
-# - read_ict_file / read_ict / read_ict_dir
-# - pick_ict_files (optional "prefix" lets you match e.g. "ARCSIX-")
-# - Instrument readers: read_aps / read_pops / read_uhsas / read_fims / read_nmass / read_inlet_flag
-# - Bin metadata extraction, relabeling, spectra helpers, grid checks, alignment, filtering,
-#   flag analysis — all preserved.
+"""ICARTT readers and time-index helpers for aerosol instrument tables."""
 
 import re
 import warnings
@@ -26,6 +17,9 @@ __all__ = [
     "read_ict_dir",
     "pick_ict_files",
     "parse_bound",
+    "as_timezone_naive_timestamp",
+    "timezone_naive_index",
+    "drop_timezone_from_index",
     # Instrument wrappers
     "read_aps",
     "read_pops",
@@ -55,19 +49,33 @@ PathLike = Union[str, Path]
 
 # ─────────────────────────────── Small helpers ───────────────────────────────
 
-def _strip_timezone_metadata(value) -> pd.Timestamp:
-    """Parse one datetime-like value and drop timezone metadata without shifting clock time."""
+def as_timezone_naive_timestamp(value) -> pd.Timestamp:
+    """Parse a timestamp and remove timezone metadata without changing wall time."""
     ts = pd.to_datetime(value)
     if isinstance(ts, pd.Timestamp) and ts.tzinfo is not None:
         return ts.tz_localize(None)
     return ts
 
 
-def _ensure_timezone_naive_index(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    """Return a DatetimeIndex with timezone metadata removed and clock values preserved."""
+def timezone_naive_index(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Remove timezone metadata from a DatetimeIndex without changing wall time."""
+    if not isinstance(idx, pd.DatetimeIndex):
+        raise TypeError(f"Expected DatetimeIndex, got {type(idx)}")
     if idx.tz is not None:
         return idx.tz_localize(None)
     return idx
+
+
+def drop_timezone_from_index(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Return a copy with a timezone-naive DatetimeIndex when needed."""
+    if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    idx = timezone_naive_index(df.index)
+    if idx is df.index:
+        return df
+    out = df.copy()
+    out.index = idx
+    return out
 
 def _instrument_from_filename(name: str) -> Optional[str]:
     """
@@ -84,11 +92,12 @@ def _instrument_from_filename(name: str) -> Optional[str]:
 def parse_bound(x: Optional[Union[str, pd.Timestamp]], tz: Optional[str] = None) -> Optional[pd.Timestamp]:
     """Parse a start/end bound as timezone-naive wall-clock time.
 
-    The ``tz`` argument is kept for API compatibility and intentionally ignored.
+    ``tz`` is intentionally ignored; this package treats times as naive wall
+    clock values.
     """
     if x is None:
         return None
-    return _strip_timezone_metadata(x)
+    return as_timezone_naive_timestamp(x)
 
 def _has_time_component(x: Optional[Union[str, pd.Timestamp]]) -> bool:
     """True if input includes a time-of-day (not just a date)."""
@@ -101,7 +110,7 @@ def _has_time_component(x: Optional[Union[str, pd.Timestamp]]) -> bool:
 
 def _local_day_bounds(x: Union[str, pd.Timestamp], tz: Optional[str] = None) -> Tuple[pd.Timestamp, pd.Timestamp]:
     """Return timezone-naive [day_start, day_end) preserving the input clock date."""
-    ts = _strip_timezone_metadata(x)
+    ts = as_timezone_naive_timestamp(x)
     day0 = ts.normalize()
     day1 = day0 + pd.Timedelta(days=1)
     return day0, day1
@@ -126,33 +135,40 @@ def _ensure_time_column(df: pd.DataFrame, *, want_column: bool) -> pd.DataFrame:
 
 # ─────────────────────────────── Table parsing ───────────────────────────────
 
+def _date_from_ymd_or_none(year: int, month: int, day: int) -> Optional[datetime]:
+    try:
+        return datetime(year, month, day)
+    except ValueError:
+        return None
+
+
+def _date_from_yyyymmdd(text: str) -> Optional[datetime]:
+    match = re.search(r"(\d{8})", text)
+    if not match:
+        return None
+    ymd = match.group(1)
+    return _date_from_ymd_or_none(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:]))
+
+
 def _infer_meas_date(lines: List[str], path: Path) -> Optional[datetime]:
-    """From 6-int header line or any _YYYYMMDD_ in filename/header."""
+    """Infer measurement date from ICARTT header or filename."""
     for s in lines[:300]:
         parts = [p.strip() for p in s.split(",")]
         if len(parts) == 6 and all(p.isdigit() for p in parts):
             y1, m1, d1, *_ = map(int, parts)
-            try:
-                return datetime(y1, m1, d1)
-            except Exception:
-                pass
-    m = re.search(r"(\d{8})", path.name)
-    if m:
-        ymd = m.group(1)
-        y, mo, d = int(ymd[:4]), int(ymd[4:6]), int(ymd[6:])
-        try:
-            return datetime(y, mo, d)
-        except Exception:
-            pass
+            parsed = _date_from_ymd_or_none(y1, m1, d1)
+            if parsed is not None:
+                return parsed
+
+    parsed = _date_from_yyyymmdd(path.name)
+    if parsed is not None:
+        return parsed
+
     for s in lines[:300]:
-        m = re.search(r"(\d{8})", s)
-        if m:
-            ymd = m.group(1)
-            y, mo, d = int(ymd[:4]), int(ymd[4:6]), int(ymd[6:])
-            try:
-                return datetime(y, mo, d)
-            except Exception:
-                pass
+        parsed = _date_from_yyyymmdd(s)
+        if parsed is not None:
+            return parsed
+
     return None
 
 def _read_table(lines: List[str]) -> pd.DataFrame:
@@ -386,7 +402,8 @@ def _extract_bin_meta_from_header(lines: List[str], instrument_hint: Optional[st
 def _dates_from_bounds(start, end, tz: Optional[str] = None) -> List[str]:
     """Inclusive list of YYYYMMDD covered by timezone-naive start..end.
 
-    The ``tz`` argument is kept for API compatibility and intentionally ignored.
+    ``tz`` is intentionally ignored; this package treats times as naive wall
+    clock values.
     """
     t0, t1 = parse_bound(start, tz), parse_bound(end, tz)
     if t0 is None and t1 is None:
@@ -1056,7 +1073,7 @@ def check_common_grid(
     for k, df in frames.items():
         if not isinstance(df.index, pd.DatetimeIndex):
             raise TypeError(f"{k}: index must be DatetimeIndex.")
-        idx = _ensure_timezone_naive_index(df.index)
+        idx = timezone_naive_index(df.index)
         idx = idx.sort_values()
         if round_to:
             idx = idx.round(round_to)
@@ -1128,7 +1145,7 @@ def align_to_common_grid(
     for k, df in frames.items():
         if not isinstance(df.index, pd.DatetimeIndex):
             raise TypeError(f"{k}: index must be DatetimeIndex.")
-        idx = _ensure_timezone_naive_index(df.index)
+        idx = timezone_naive_index(df.index)
         idx = idx.sort_values()
         if round_to:
             idx = idx.round(round_to)
@@ -1166,7 +1183,7 @@ def align_to_common_grid(
         else:
             raise ValueError("mode must be one of: 'intersection', 'union', 'ref', 'span'.")
     else:
-        grid = _ensure_timezone_naive_index(pd.DatetimeIndex(grid)).sort_values()
+        grid = timezone_naive_index(pd.DatetimeIndex(grid)).sort_values()
         if round_to:
             grid = grid.round(round_to)
         if grid.has_duplicates:
@@ -1222,7 +1239,7 @@ def filter_by_spectra_presence(
     norm: Dict[str, pd.DataFrame] = {}
     for k, df in frames.items():
         if isinstance(df.index, pd.DatetimeIndex):
-            idx = _ensure_timezone_naive_index(df.index)
+            idx = timezone_naive_index(df.index)
             tmp = df.copy()
             tmp.index = idx
             norm[k] = tmp
@@ -1263,7 +1280,7 @@ def filter_by_spectra_presence(
             if k in mask_table:
                 if isinstance(extra.index, pd.DatetimeIndex):
                     extra = extra.copy()
-                    extra.index = _ensure_timezone_naive_index(extra.index)
+                    extra.index = timezone_naive_index(extra.index)
                 mask_table[k] = mask_table[k] & extra.reindex(union_idx).fillna(False).astype(bool)
 
     # Default threshold = number of *spectral* instruments

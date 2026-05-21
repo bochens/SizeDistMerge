@@ -5,30 +5,44 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FormatStrFormatter
-from matplotlib.ticker import FuncFormatter
 from datetime import timedelta
 from netCDF4 import Dataset, stringtochar
 from datetime import datetime
 import traceback
 
-from .ict_utils import (read_aps, read_nmass, read_pops, read_uhsas, read_fims, read_inlet_flag, read_microphysical, 
-    check_common_grid, filter_by_spectra_presence, mean_spectrum, get_spectra)
-from .utils import (edges_from_mids_geometric, dvdlog_from_dndlog,  remap_dndlog_by_edges_any,
-    dsdlog_from_dndlog, mids_from_edges, remap_dndlog_by_edges, select_between, delta_log10_from_edges)
-from .alignment import optimize_multi_custom
-from .optical_diameter import SigmaLUT, convert_do_lut, RI_UHSAS_SRC, RI_POPS_SRC
-from .diameter_conversion import da_to_dv
-from .combine import make_grid_from_series, merge_sizedists_tikhonov, merge_sizedists_tikhonov_consensus
-from .plot import plot_size_distributions, plot_size_distributions_steps
-from .resources import lut_path
+from sizedistmerge.ict_utils import (
+    as_timezone_naive_timestamp,
+    check_common_grid,
+    drop_timezone_from_index,
+    filter_by_spectra_presence,
+    get_spectra,
+    mean_spectrum,
+    read_aps,
+    read_fims,
+    read_inlet_flag,
+    read_microphysical,
+    read_pops,
+    read_uhsas,
+    timezone_naive_index,
+)
+from sizedistmerge.utils import (
+    delta_log10_from_edges,
+    dvdlog_from_dndlog,
+    edges_from_mids_geometric,
+    mids_from_edges,
+    remap_dndlog_by_edges,
+    remap_dndlog_by_edges_any,
+    select_between,
+)
+from sizedistmerge.alignment import optimize_multi_custom
+from sizedistmerge.optical_diameter import SigmaLUT, convert_do_lut, RI_UHSAS_SRC, RI_POPS_SRC
+from sizedistmerge.diameter_conversion import da_to_dv
+from sizedistmerge.combine import make_grid_from_series, merge_sizedists_tikhonov, merge_sizedists_tikhonov_consensus
+from sizedistmerge.plot import plot_size_distributions, plot_size_distributions_steps
+from sizedistmerge.resources import lut_path
 
 __all__ = [
     "DEFAULT_TEMPORAL_PRIOR_PARAMS",
-    "as_timezone_naive_timestamp",
-    "drop_timezone_from_index",
-    "load_aufi_oneday",
-    "load_af_oneday",
     "load_arcsix_merge_frames_for_day",
     "split_frames",
     "periods_from_split_frames",
@@ -122,14 +136,6 @@ def _parse_base_time(ds: Dataset) -> datetime:
     if base_dt.tzinfo is not None:
         base_dt = base_dt.replace(tzinfo=None)
     return base_dt
-
-
-def _ensure_naive_datetime_index(idx: pd.Index) -> pd.DatetimeIndex:
-    if not isinstance(idx, pd.DatetimeIndex):
-        raise TypeError("Expected a DatetimeIndex for CPC time axis.")
-    if idx.tz is not None:
-        idx = idx.tz_localize(None)
-    return idx
 
 
 def _optional_1d(ds: Dataset, name: str, n_chunks: int) -> np.ndarray:
@@ -265,7 +271,7 @@ def _read_cpc_series(micro_dir: Path, date_str: str, cpc_column: str) -> pd.Seri
     if cpc_column not in micro:
         raise RuntimeError(f"Microphysical data for {date_str} missing {cpc_column!r}")
     cpc_series = pd.to_numeric(micro[cpc_column], errors="coerce")
-    cpc_series.index = _ensure_naive_datetime_index(cpc_series.index)
+    cpc_series.index = timezone_naive_index(cpc_series.index)
     return cpc_series
 
 
@@ -1190,37 +1196,6 @@ def convert_qc_netcdf_to_icartt(
         )
     return tuple(written)
 
-
-
-def _as_timezone_naive_timestamp(value):
-    """Parse a datetime-like value and drop timezone metadata without shifting clock time."""
-    ts = pd.to_datetime(value)
-    if isinstance(ts, pd.Timestamp) and ts.tz is not None:
-        return ts.tz_localize(None)
-    return ts
-
-
-def as_timezone_naive_timestamp(value):
-    """Parse a datetime-like value and drop timezone metadata without shifting clock time."""
-    return _as_timezone_naive_timestamp(value)
-
-
-def _drop_timezone_from_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy with a tz-naive DatetimeIndex, preserving displayed clock time."""
-    if df is None or df.empty:
-        return df
-    if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-        out = df.copy()
-        out.index = df.index.tz_localize(None)
-        return out
-    return df
-
-
-def drop_timezone_from_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a DataFrame with a tz-naive index, preserving displayed clock time."""
-    return _drop_timezone_from_index(df)
-
-
 def _nonnegative_float(value, name: str) -> float:
     value = float(value)
     if not np.isfinite(value):
@@ -1356,14 +1331,8 @@ def _build_temporal_arrays(
     return np.asarray(targets, dtype=float), np.asarray(weights, dtype=float)
 
 
-def load_aufi_oneday(a_date, aps_dir, uhsas_dir, fims_dir, pops_dir=None):
-    """
-    Read ARCSIX APS, FIMS, and optionally UHSAS/POPS for one day.
-
-    All available instruments are aligned to the FIMS time grid, FIMS QC=2 rows
-    are removed, and rows are kept only when every loaded instrument has a
-    valid spectrum.
-    """
+def read_arcsix_merge_instruments_for_day(a_date, aps_dir, fims_dir, *, uhsas_dir=None, pops_dir=None):
+    """Read and filter one ARCSIX day for the standard merge instrument set."""
     frames = {
         "APS": read_aps(aps_dir, start=a_date, end=None, prefix="ARCSIX"),
         "FIMS": read_fims(fims_dir, start=a_date, end=None, prefix="ARCSIX"),
@@ -1394,20 +1363,16 @@ def load_aufi_oneday(a_date, aps_dir, uhsas_dir, fims_dir, pops_dir=None):
 
     return filtered
 
-def load_af_oneday(a_date, aps_dir, fims_dir):
-    """
-    Read raw APS + FIMS for the day, line them up on the FIMS time grid,
-    then drop any times where not all spectral instruments have valid data
-    (FIMS also must pass QC != 2). This version does NOT read UHSAS.
-    """
-    aps  = read_aps (aps_dir,  start=a_date, end=None, prefix="ARCSIX")
+def read_arcsix_aps_fims_for_day(a_date, aps_dir, fims_dir):
+    """Read and filter one ARCSIX day for the direct APS+FIMS merge."""
+    aps = read_aps(aps_dir, start=a_date, end=None, prefix="ARCSIX")
     fims = read_fims(fims_dir, start=a_date, end=None, prefix="ARCSIX")
 
     frames = {"APS": aps, "FIMS": fims}
     _ = check_common_grid(frames, ref_key="FIMS", round_to=None)
 
     fims_qc = pd.to_numeric(fims.get("QC_Flag", pd.Series(index=fims.index)), errors="coerce")
-    extra = {"FIMS": fims_qc.ne(2)}  # bad = 2
+    extra = {"FIMS": fims_qc.ne(2)}
 
     filtered, _keep = filter_by_spectra_presence(
         frames,
@@ -1443,8 +1408,14 @@ def load_arcsix_merge_frames_for_day(
     pops_dir = data_dir / "PUTLS-POPS" if "POPS" in merge_instruments else None
     fims_dir = data_dir / "FIMS"
 
-    frames = load_aufi_oneday(date, aps_dir, uhsas_dir, fims_dir, pops_dir)
-    frames = {name: _drop_timezone_from_index(df) for name, df in frames.items()}
+    frames = read_arcsix_merge_instruments_for_day(
+        date,
+        aps_dir,
+        fims_dir,
+        uhsas_dir=uhsas_dir,
+        pops_dir=pops_dir,
+    )
+    frames = {name: drop_timezone_from_index(df) for name, df in frames.items()}
 
     if "FIMS" in frames and frames["FIMS"] is not None and not frames["FIMS"].empty:
         frames["FIMS"] = frames["FIMS"].copy()
@@ -1497,8 +1468,8 @@ def periods_from_split_frames(chunks) -> list[tuple[pd.Timestamp, pd.Timestamp]]
             continue
         periods.append(
             (
-                _as_timezone_naive_timestamp(min(times)),
-                _as_timezone_naive_timestamp(max(times)),
+                as_timezone_naive_timestamp(min(times)),
+                as_timezone_naive_timestamp(max(times)),
             )
         )
     return periods
@@ -2761,8 +2732,8 @@ def run_arcsix_merge_for_periods(
     # ---------- parse periods, force tz-naive wall-clock datetimes ----------
     _periods = []
     for idx, (s_raw, e_raw) in enumerate(time_periods):
-        s_ts = _as_timezone_naive_timestamp(s_raw)
-        e_ts = _as_timezone_naive_timestamp(e_raw)
+        s_ts = as_timezone_naive_timestamp(s_raw)
+        e_ts = as_timezone_naive_timestamp(e_raw)
 
         if e_ts <= s_ts:
             raise ValueError(f"Period {idx}: end <= start ({s_ts} >= {e_ts})")
@@ -2881,10 +2852,16 @@ def run_arcsix_merge_for_periods(
         prev_params      = temporal_prior.copy() if temporal_prior is not None else None
 
         # --------- load frames & drop timezone metadata without clock conversion ---------
-        filtered_frames = load_aufi_oneday(a_date, aps_dir, uhsas_dir, fims_dir, pops_dir)
+        filtered_frames = read_arcsix_merge_instruments_for_day(
+            a_date,
+            aps_dir,
+            fims_dir,
+            uhsas_dir=uhsas_dir,
+            pops_dir=pops_dir,
+        )
 
         for name, df in list(filtered_frames.items()):
-            filtered_frames[name] = _drop_timezone_from_index(df)
+            filtered_frames[name] = drop_timezone_from_index(df)
 
         # shift FIMS by -fims_lag seconds (indices already tz-naive now)
         if "FIMS" in filtered_frames and not filtered_frames["FIMS"].empty:
@@ -2894,10 +2871,10 @@ def run_arcsix_merge_for_periods(
             )
 
         inlet_flag = read_inlet_flag(inlet_dir, start=a_date, end=None, prefix="ARCSIX")
-        inlet_flag = _drop_timezone_from_index(inlet_flag)
+        inlet_flag = drop_timezone_from_index(inlet_flag)
 
         micro = read_microphysical(micro_dir, start=a_date, end=None, prefix="ARCSIX")
-        micro = _drop_timezone_from_index(micro)
+        micro = drop_timezone_from_index(micro)
 
         cpc_total = pd.to_numeric(micro.get("CNgt10nm"), errors="coerce")
 
@@ -3326,8 +3303,8 @@ def _run_arcsix_merge_for_periods_direct(
     # ---------- parse periods, force tz-naive wall-clock datetimes ----------
     _periods = []
     for idx, (s_raw, e_raw) in enumerate(time_periods):
-        s_ts = _as_timezone_naive_timestamp(s_raw)
-        e_ts = _as_timezone_naive_timestamp(e_raw)
+        s_ts = as_timezone_naive_timestamp(s_raw)
+        e_ts = as_timezone_naive_timestamp(e_raw)
 
         if e_ts <= s_ts:
             raise ValueError(f"Period {idx}: end <= start ({s_ts} >= {e_ts})")
@@ -3411,10 +3388,10 @@ def _run_arcsix_merge_for_periods_direct(
 
         # --------- load frames & drop timezone metadata without clock conversion ---------
         # APS + FIMS only
-        filtered_frames = load_af_oneday(a_date, aps_dir, fims_dir)
+        filtered_frames = read_arcsix_aps_fims_for_day(a_date, aps_dir, fims_dir)
 
         for name, df in list(filtered_frames.items()):
-            filtered_frames[name] = _drop_timezone_from_index(df)
+            filtered_frames[name] = drop_timezone_from_index(df)
 
         # shift FIMS by -fims_lag seconds (indices already tz-naive now)
         if "FIMS" in filtered_frames and not filtered_frames["FIMS"].empty:
@@ -3424,10 +3401,10 @@ def _run_arcsix_merge_for_periods_direct(
             )
 
         inlet_flag = read_inlet_flag(inlet_dir, start=a_date, end=None, prefix="ARCSIX")
-        inlet_flag = _drop_timezone_from_index(inlet_flag)
+        inlet_flag = drop_timezone_from_index(inlet_flag)
 
         micro = read_microphysical(micro_dir, start=a_date, end=None, prefix="ARCSIX")
-        micro = _drop_timezone_from_index(micro)
+        micro = drop_timezone_from_index(micro)
 
         cpc_total = pd.to_numeric(micro.get("CNgt10nm"), errors="coerce")
 

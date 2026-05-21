@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 legacy_src_storage/
+.pytest_cache/
+build/
+dist/
+*.egg-info/
 
 .DS_Store
 /Users/C832577250/Research/SizeDistMerge/notebook/time_series_lab.ipynb

@@ -13,65 +13,81 @@ If you use this code in your research, please **cite it using the DOI: https://z
 
 Code currently developed and maintained by [Kreidenweis Research Group](https://chem.atmos.colostate.edu/) at [Colorado State University](https://www.atmos.colostate.edu/). Collaboration welcome—issues and pull requests appreciated.
 
-## Repo Structure
+## Install
 
-### `notebook/`
+SizeDistMerge is now structured as an installable Python package.
 
-- **opc_response_demo.ipynb**
-  Jupyter notebook demo for calculating OPC response function.
+```bash
+python -m pip install -e .
+```
 
-- **sizedistmerge_lab.ipynb**
-  Main demo for merging size distribution data (using NASA icartt data)
+The package requires Python `>=3.12`. The optional `numba` dependency can be
+installed with:
 
-- **twomey_lab.ipynb**
-  Experimental testing with twomey implementation
+```bash
+python -m pip install -e ".[numba]"
+```
 
-- **batch_merging_lab.ipynb**
-  Jupyter notebook for executing the **merge_production.py** pipeline specifically for the NASA ARCSIX campaign. Creates data production logs, error logs, diagnostic figures (optimization loss curves, merge plots, and time series), and the merged size distribution output in .netcdf files. Also contains a QC procedure to flag merged size distribution based on a comparison with CPC measurements.
+## Basic Usage
 
-### `src/`
+Reusable library functions are available from the top-level package:
 
-- **optical_diameter_core.py**  
-  Contains functions for computing the **optical response function** — the relationship between particle diameter and the scattering amplitude (the scattering cross-section integrated over the opc collection angle) based on Mie theory — for various Optical Particle Counters (OPCs). Currently, **POPS** and **UHSAS** geometries are implemented.  
+```python
+import sizedistmerge as sdm
 
-  This module also provides tools for generating and interfacing with **lookup tables (LUTs)** of σ(D; m) as a function of particle diameter and refractive index.  
+edges = sdm.edges_from_mids_geometric([10, 20, 40])
+dv = sdm.da_to_dv(1000.0, rho_p=1000.0)
+lut = sdm.SigmaLUT(str(sdm.lut_path("uhsas")))
+```
 
-  The function `make_monotone_sigma_interpolator()` enforces monotonicity in the OPC response curve, allowing a one-to-one mapping between diameters at different refractive indices. This enables **remapping** (i.e., converting bin edges between refractive indices) while conserving particle counts.
+The top-level API is intended for reusable size-distribution, diameter,
+optical/LUT, alignment, and merge utilities. Campaign production workflows are
+kept under explicit ARCSIX imports.
 
-  The key function is **`convert_do_lut()`**, which:
-  - Takes an array of optical diameters (typically bin edges for rebinning `dN/dlogDp` data),
-  - Applies the OPC response function for a **source refractive index**,
-  - And remaps to a **target refractive index**, producing a new set of equivalent bin edges that reflect how particle sizing shifts under different optical properties.
-  - Use pre-computed LUT for speed.
+## ARCSIX Production Workflow
 
-- **diameter-conversion-core.py** 
-  Contains `da_to_dv()` to convert aerodynamic diameter (da) to volume equivalent diameter, and is currently used for remapping APS instrument bins based on density and Chi.
+ARCSIX batch production, post-merge QC, and ICARTT conversion live in one
+campaign module:
 
-  Will add more functions to convert among mobility diameter (db), da and dv.
+```python
+from sizedistmerge import arcsix_merge_production as mp
 
-- **sizedist_alignment.py**  
-  Optimization routines that use the bin-remapping functions to align aerosol size distributions and simultaneously retrieve aerosol properties (e.g., **refractive index**, **density**, etc.) by minimizing the **mean squared error (MSE)** over overlapping regions of two or more instruments' size distributions.
+mp.run_arcsix_merge_for_periods(...)
+mp.run_post_merge_product_qc(...)
+mp.convert_qc_netcdf_to_icartt(...)
+```
 
-- **sizedist_combine.py**  
-  Routines to reconstruct a **smooth aerosol size distribution** from multiple instruments onto a common diameter grid. 
+The current package notebook
+`notebook/arcsix_merge_1min_5min_package.ipynb` shows the 5-minute and
+1-minute ARCSIX recipes using the packaged API. The notebook keeps run-specific
+settings visible, while reusable mechanics live in `.py` modules.
 
-- **sizedist_utils.py**
-  Contains useful helper functions for dealing with aerosol size distribution
+## Package Layout
 
-- **merge_production.py**
-  Contains data production pipeline functions for merging batches of aerosol size distributions. Currently used for airborne campaign measurements.
+The import package is under `src/sizedistmerge/`:
 
-- **forward_kernel.py** (testing)
-  Forward functions for Twomey inversion
+- `utils.py` - size-bin geometry, `dN/dlogDp` conversions, and count-conserving remapping.
+- `diameter_conversion.py` - aerodynamic-to-volume-equivalent diameter conversion.
+- `kappa_kohler.py` - kappa-Kohler and hygroscopic-growth utilities.
+- `optical_diameter.py` - POPS/UHSAS Mie-response geometry, LUT builders, and optical diameter remapping.
+- `alignment.py` - MSE overlap objectives, RI/density optimization, and temporal regularization helpers.
+- `combine.py` - Tikhonov and consensus merge routines on common grids.
+- `ict_utils.py` - ICARTT readers and instrument-specific ARCSIX data readers.
+- `plot.py` - size-distribution plotting helpers.
+- `arcsix_merge_production.py` - ARCSIX merge runner, product QC, and ICARTT writer.
+- `resources.py` - package-data lookup helpers such as `sdm.lut_path(...)`.
 
-- **twomey_inversion.py** (testing)
-  main Twomey inversion code
+Old flat scripts are stored separately under `legacy_src_storage/` for
+reference. New code should import from `sizedistmerge` or from
+`sizedistmerge.arcsix_merge_production`.
 
-### `lut/`
+## Packaged LUT Data
 
-- **pops_sigma_col_405nm.zarr**  
-  Calculated scattering cross-sections for POPS at **405 nm**, indexed by particle diameter and real and imaginary part of refractive index.
+The POPS and UHSAS LUTs are packaged inside the wheel under
+`src/sizedistmerge/data/lut/`:
 
-- **uhsas_sigma_col_1054nm.zarr**  
-  Similar dataset for UHSAS at **1054 nm**.
+- `pops_sigma_col_405nm.zarr`
+- `uhsas_sigma_col_1054nm.zarr`
 
+Use `sdm.lut_path("pops")` or `sdm.lut_path("uhsas")` instead of hard-coded
+relative paths.

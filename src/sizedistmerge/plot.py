@@ -170,7 +170,7 @@ def plot_size_distributions(
             axf.grid(False)
             axf.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
             axf.xaxis.set_minor_locator(mdates.MinuteLocator(interval=2))
-            axf.set_xlabel("Time (UTC)")
+            axf.set_xlabel("Time")
 
     plt.tight_layout()
     return fig, (ax, axf), handles
@@ -308,7 +308,7 @@ def plot_size_distributions_steps(
             axf.grid(False)
             axf.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
             axf.xaxis.set_minor_locator(mdates.MinuteLocator(interval=2))
-            axf.set_xlabel("Time (UTC)")
+            axf.set_xlabel("Time")
 
     plt.tight_layout()
     return fig, (ax, axf), handles

@@ -15,6 +15,8 @@ __all__ = [
     "mse_overlap_sizedist",
     "objective_opc_vs_ref",
     "optimize_refractive_index_for_opc",
+    "temporal_parameter_penalty",
+    "objective_joint_named_temporal",
     "objective_multi_custom",
     "optimize_multi_custom",
 ]
@@ -28,21 +30,6 @@ def _clean(x, y):
     y = np.asarray(y, dtype=float)
     m = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
     return x[m], y[m]
-
-
-def _prepare_curve(x, y) -> tuple[np.ndarray, np.ndarray]:
-    """Return a clean, strictly increasing curve for log-axis interpolation."""
-    x, y = _clean(x, y)
-    if x.size < 2:
-        return x, y
-    order = np.argsort(x)
-    x = x[order]
-    y = y[order]
-    x_unique, inv, counts = np.unique(x, return_inverse=True, return_counts=True)
-    if x_unique.size != x.size:
-        y = np.bincount(inv, weights=y) / counts
-        x = x_unique
-    return x, y
 
 
 def _has_overlap(xa: np.ndarray, xb: np.ndarray) -> bool:
@@ -77,15 +64,10 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, moment="N", space="linear"):
     float
         Mean squared error over a common log-spaced grid.
     """
-    if moment not in {"N", "S", "V"}:
-        raise ValueError("moment must be 'N', 'S', or 'V'")
-    if space not in {"linear", "log"}:
-        raise ValueError("space must be 'linear' or 'log'")
-
-    x1, y1 = _prepare_curve(x1, y1)
-    x2, y2 = _prepare_curve(x2, y2)
-    if x1.size < 2 or x2.size < 2 or not _has_overlap(x1, x2):
-        return np.inf
+    x1 = np.asarray(x1, float)
+    y1 = np.asarray(y1, float)
+    x2 = np.asarray(x2, float)
+    y2 = np.asarray(y2, float)
 
     lo = max(np.min(x1), np.min(x2))
     hi = min(np.max(x1), np.max(x2))
@@ -258,7 +240,7 @@ def _build_param_slices(bounds_list: List[List[Tuple[float, float]]]) -> List[sl
     return slices
 
 
-def objective_multi_custom(
+def _multi_custom_data_cost_and_flag(
     x_vec: np.ndarray,
     ref_mids: np.ndarray, ref_y: np.ndarray,   # fixed reference curve (no remap)
     instruments: List[Dict[str, object]],      # per-instrument configs (see below)
@@ -267,54 +249,7 @@ def objective_multi_custom(
     moment: str = "N",
     space: str = "linear",
     pair_weights: List[Tuple[int, int, float]] | None = None,  # optional list of (i, j, w)
-) -> float:
-    """
-    Compute a weighted sum of mismatch (MSE) terms between remapped instruments
-    and a reference curve, plus optional cross-instrument pairwise terms.
-
-    Cost function:
-        cost = sum_i  w_ref_i * MSE(remap(i), ref)
-             + sum_{(i,j) in pairs} w_ij * MSE(remap(i), remap(j))
-
-    This function is agnostic to instrument type. Each instrument provides:
-      - "edges": np.ndarray, original bin edges [nm], length M_i+1
-      - "y":     np.ndarray, original dN/dlog10D on those bins, length M_i
-      - "remap_fn": Callable(edges, theta, **kwargs) -> new_edges
-            Your function that maps OLD edges -> NEW edges given a parameter
-            vector theta (any length) and any fixed kwargs you need (e.g., LUTs).
-      - "kwargs": dict, fixed keyword arguments passed to remap_fn
-      - "w_ref": float, weight for instrument-vs-reference term (default 1.0)
-
-    Parameters
-    ----------
-    x_vec : np.ndarray
-        Flattened optimizer parameter vector (concatenation of all instruments'
-        parameter vectors). Use `param_slices[i]` to extract theta_i for instrument i.
-    ref_mids, ref_y : arrays
-        The reference sizedist midpoints and values (already in the moment you want).
-        The reference is NOT remapped here.
-    instruments : list of dict
-        See definition above. Each dict fully defines how to remap one instrument.
-    param_slices : list of slice
-        Output of _build_param_slices(bounds_list). Each slice selects theta_i.
-    moment : {"N", "S", "V"}
-        Which weighting to use inside MSE:
-          N → number       (weight = 1)
-          S → surface      (weight ~ D^2)
-          V → volume       (weight ~ D^3)
-        D is in micrometers internally for the weighting.
-    space : {"linear", "log"}
-        Compute MSE either on linear values or on log10(values) when positive.
-    pair_weights : list[tuple(int, int, float)] | None
-        Optional cross-instrument terms. Each tuple (i, j, w) adds:
-            w * MSE(remap(i), remap(j))
-        Use indices into `instruments` (0-based).
-
-    Returns
-    -------
-    float
-        Total cost for the optimizer to minimize.
-    """
+):
     # --- Remap all instruments for this x_vec ---
     # For each instrument i:
     #   - extract its parameter subvector theta_i
@@ -371,11 +306,212 @@ def objective_multi_custom(
                     weight_sum += w
 
     # Average by total weight of the comparisons that actually had overlap.
-    # If NOTHING overlapped, return 0.0 (neutral: neither reward nor penalize).
+    # If NOTHING overlapped, keep the old neutral behavior.
     if weight_sum > 0.0:
-        return float(cost_sum / weight_sum)
-    else:
+        return float(cost_sum / weight_sum), True
+    return 0.0, False
+
+
+def objective_multi_custom(
+    x_vec: np.ndarray,
+    ref_mids: np.ndarray, ref_y: np.ndarray,   # fixed reference curve (no remap)
+    instruments: List[Dict[str, object]],      # per-instrument configs (see below)
+    param_slices: List[slice],                  # slices into x_vec for each instrument
+    *,
+    moment: str = "N",
+    space: str = "linear",
+    pair_weights: List[Tuple[int, int, float]] | None = None,  # optional list of (i, j, w)
+) -> float:
+    """
+    Compute a weighted sum of mismatch (MSE) terms between remapped instruments
+    and a reference curve, plus optional cross-instrument pairwise terms.
+
+    Cost function:
+        cost = sum_i  w_ref_i * MSE(remap(i), ref)
+             + sum_{(i,j) in pairs} w_ij * MSE(remap(i), remap(j))
+
+    Instrument/reference and pair terms are skipped when their spectra do not
+    overlap. If no real comparison contributes, this keeps the old neutral
+    behavior and returns 0.0.
+    """
+    cost, _has_comparison = _multi_custom_data_cost_and_flag(
+        x_vec,
+        ref_mids,
+        ref_y,
+        instruments,
+        param_slices,
+        moment=moment,
+        space=space,
+        pair_weights=pair_weights,
+    )
+    return cost
+
+
+def temporal_parameter_penalty(
+    x_vec: np.ndarray,
+    target: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """
+    Penalize parameter jumps relative to the previous successful chunk.
+
+    The penalty is an unnormalized weighted sum:
+        sum_i weights_i * (x_i - target_i)^2
+
+    Non-positive weights disable a parameter. Targets with positive weights
+    must be finite so bad temporal state cannot silently enter the optimizer.
+    """
+    x_vec = np.asarray(x_vec, dtype=float)
+    target = np.asarray(target, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+
+    if x_vec.ndim != 1 or target.ndim != 1 or weights.ndim != 1:
+        raise ValueError("x_vec, target, and weights must be one-dimensional")
+    if x_vec.size != target.size or x_vec.size != weights.size:
+        raise ValueError("temporal target and weights must match optimizer parameter length")
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("temporal weights must be finite")
+    if np.any(weights < 0.0):
+        raise ValueError("temporal weights must be non-negative")
+
+    active = weights > 0.0
+    if not np.any(active):
         return 0.0
+    if not np.all(np.isfinite(target[active])):
+        raise ValueError("temporal target must be finite where temporal weight is positive")
+    if not np.all(np.isfinite(x_vec[active])):
+        return np.inf
+
+    delta = x_vec[active] - target[active]
+    return float(np.sum(weights[active] * delta * delta))
+
+
+def _remap_one_instrument(edges, y, remap_fn: Callable, theta, kwargs):
+    edges_src = np.asarray(edges, dtype=float)
+    y_src = np.asarray(y, dtype=float)
+    edges_dst = np.asarray(remap_fn(edges_src, np.asarray(theta, dtype=float), **dict(kwargs or {})), dtype=float)
+    y_dst = remap_dndlog_by_edges(edges_src, edges_dst, y_src)
+    return mids_from_edges(edges_dst), y_dst
+
+
+def objective_joint_named_temporal(
+    params,
+    *,
+    ref_mids,
+    ref_y,
+    uhsas_edges,
+    uhsas_y,
+    pops_edges,
+    pops_y,
+    aps_edges,
+    aps_y,
+    uhsas_remap_fn,
+    uhsas_kwargs,
+    pops_remap_fn,
+    pops_kwargs,
+    aps_remap_fn,
+    aps_kwargs,
+    moment: str = "V",
+    space: str = "linear",
+    w_uhsas: float = 1.0,
+    w_pops: float = 1.0,
+    w_aps: float = 1.0,
+    pair_w: float = 0.0,
+    temporal_w: float = 0.0,
+    temporal_w_uh: float = 0.0,
+    temporal_w_po: float = 0.0,
+    temporal_w_rho: float = 0.0,
+    prev_params=None,
+    smooth_rho: bool = True,
+):
+    """
+    Named UHSAS/POPS/APS objective with old no-overlap behavior.
+
+    Instrument/reference terms and pair terms are skipped when there is no
+    overlap. If no real comparison contributes, the objective returns 0.0 and
+    does not apply temporal penalties.
+    """
+    params = np.asarray(params, dtype=float)
+    if params.shape != (3,):
+        raise ValueError("params must be shape (3,) = [n_uhsas, n_pops, rho_aps]")
+    n_uh, n_po, rho = float(params[0]), float(params[1]), float(params[2])
+
+    xm_uh, ym_uh = _remap_one_instrument(
+        uhsas_edges, uhsas_y, uhsas_remap_fn, np.array([n_uh], float), uhsas_kwargs
+    )
+    xm_po, ym_po = _remap_one_instrument(
+        pops_edges, pops_y, pops_remap_fn, np.array([n_po], float), pops_kwargs
+    )
+    xm_ap, ym_ap = _remap_one_instrument(
+        aps_edges, aps_y, aps_remap_fn, np.array([rho], float), aps_kwargs
+    )
+
+    cost_sum = 0.0
+    w_sum = 0.0
+
+    for w, xm, ym in (
+        (float(w_uhsas), xm_uh, ym_uh),
+        (float(w_pops), xm_po, ym_po),
+        (float(w_aps), xm_ap, ym_ap),
+    ):
+        if w == 0.0 or not _has_overlap(ref_mids, xm):
+            continue
+        mse = mse_overlap_sizedist(ref_mids, ref_y, xm, ym, moment=moment, space=space)
+        if np.isfinite(mse):
+            cost_sum += w * mse
+            w_sum += w
+
+    base = (cost_sum / w_sum) if w_sum > 0.0 else 0.0
+    any_comparison = w_sum > 0.0
+
+    if pair_w != 0.0:
+        pair_cost = 0.0
+        pair_count = 0
+
+        for xa, ya, xb, yb in (
+            (xm_uh, ym_uh, xm_ap, ym_ap),
+            (xm_po, ym_po, xm_ap, ym_ap),
+        ):
+            if not _has_overlap(xa, xb):
+                continue
+            mse = mse_overlap_sizedist(xa, ya, xb, yb, moment=moment, space=space)
+            if np.isfinite(mse):
+                pair_cost += mse
+                pair_count += 1
+
+        if pair_count > 0:
+            base = float(base) + float(pair_w) * (pair_cost / pair_count)
+            any_comparison = True
+
+    if (not any_comparison) or (not np.isfinite(base)):
+        return 0.0
+
+    if prev_params is not None:
+        prev = np.asarray(prev_params, dtype=float)
+        if prev.shape != (3,):
+            raise ValueError("prev_params must be shape (3,) = [n_uh, n_po, rho]")
+
+        d_uh = n_uh - float(prev[0])
+        d_po = n_po - float(prev[1])
+        d_rho = rho - float(prev[2])
+
+        tw = float(temporal_w)
+        if tw != 0.0:
+            base += tw * (d_uh * d_uh + d_po * d_po)
+            if smooth_rho:
+                base += tw * (d_rho * d_rho)
+
+        t_uh = float(temporal_w_uh)
+        t_po = float(temporal_w_po)
+        t_rh = float(temporal_w_rho)
+        if t_uh != 0.0:
+            base += t_uh * (d_uh * d_uh)
+        if t_po != 0.0:
+            base += t_po * (d_po * d_po)
+        if smooth_rho and t_rh != 0.0:
+            base += t_rh * (d_rho * d_rho)
+
+    return float(base)
 
 
 def optimize_multi_custom(
@@ -386,6 +522,8 @@ def optimize_multi_custom(
     moment: str = "N",
     space: str = "linear",
     pair_weights: List[Tuple[int, int, float]] | None = None,
+    temporal_target: np.ndarray | None = None,
+    temporal_weights: np.ndarray | None = None,
     maxiter: int = 200,
     tol: float = 1e-6,
     seed: int = 123,
@@ -432,6 +570,11 @@ def optimize_multi_custom(
         Optional list of (i, j, w) to penalize mismatch between *remapped*
         instruments i and j in addition to reference comparisons.
         Use i, j indices into `instruments` (0-based).
+    temporal_target, temporal_weights : arrays or None
+        Optional parameter-space regularization against the previous
+        successful chunk. Arrays must match the flattened optimizer parameter
+        vector. The temporal term added to the objective is
+        sum(weights * (x - target)^2).
     maxiter, tol, seed : optimizer controls
         Passed directly to SciPy differential_evolution.
 
@@ -470,18 +613,49 @@ def optimize_multi_custom(
         raise ValueError("bounds_list must contain at least one parameter bound")
     param_slices = _build_param_slices(bounds_list)
 
-    history = {"total": []}
+    if (temporal_target is None) != (temporal_weights is None):
+        raise ValueError("temporal_target and temporal_weights must be provided together")
+    if temporal_target is not None:
+        temporal_target = np.asarray(temporal_target, dtype=float)
+        temporal_weights = np.asarray(temporal_weights, dtype=float)
+        if temporal_target.shape != (len(flat_bounds),) or temporal_weights.shape != (len(flat_bounds),):
+            raise ValueError("temporal_target and temporal_weights must match flattened bounds length")
+        _ = temporal_parameter_penalty(
+            np.asarray([lo for lo, _hi in flat_bounds], dtype=float),
+            temporal_target,
+            temporal_weights,
+        )
+
+    history = {"total": [], "data": [], "temporal": []}
 
     # Closure passed to SciPy: maps x_vec -> scalar cost
-    def obj(x_vec):
-        return objective_multi_custom(
+    def data_obj_with_flag(x_vec):
+        return _multi_custom_data_cost_and_flag(
             x_vec, ref_mids, ref_y, instruments, param_slices,
             moment=moment, space=space, pair_weights=pair_weights,
         )
 
+    def data_obj(x_vec):
+        data_cost, _has_comparison = data_obj_with_flag(x_vec)
+        return data_cost
+
+    def temporal_obj(x_vec):
+        if temporal_target is None or temporal_weights is None:
+            return 0.0
+        return temporal_parameter_penalty(x_vec, temporal_target, temporal_weights)
+
+    def obj(x_vec):
+        data_cost, has_comparison = data_obj_with_flag(x_vec)
+        temporal_cost = temporal_obj(x_vec) if has_comparison and np.isfinite(data_cost) else 0.0
+        return float(data_cost + temporal_cost)
+
     # Callback to record convergence history (optional but handy)
     def _cb(xk, _conv):
-        history["total"].append(float(obj(xk)))
+        data_cost, has_comparison = data_obj_with_flag(xk)
+        temporal_cost = temporal_obj(xk) if has_comparison and np.isfinite(data_cost) else 0.0
+        history["data"].append(float(data_cost))
+        history["temporal"].append(float(temporal_cost))
+        history["total"].append(float(data_cost + temporal_cost))
         return False  # returning True would stop the optimizer early
 
     # --- Run differential evolution over the flat parameter vector ---
@@ -501,5 +675,15 @@ def optimize_multi_custom(
     best_thetas: List[np.ndarray] = []
     for s in param_slices:
         best_thetas.append(np.asarray(res.x[s], float).copy())
+
+    best_data_cost, best_has_comparison = data_obj_with_flag(res.x)
+    best_temporal_cost = (
+        temporal_obj(res.x)
+        if best_has_comparison and np.isfinite(best_data_cost)
+        else 0.0
+    )
+    history["best_data_cost"] = float(best_data_cost)
+    history["best_temporal_cost"] = float(best_temporal_cost)
+    history["best_total_cost"] = float(best_data_cost + best_temporal_cost)
 
     return best_thetas, float(res.fun), res, history

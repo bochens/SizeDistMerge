@@ -73,6 +73,8 @@ _MODULE_EXPORTS = {
         "mse_overlap_sizedist",
         "objective_opc_vs_ref",
         "optimize_refractive_index_for_opc",
+        "temporal_parameter_penalty",
+        "objective_joint_named_temporal",
         "objective_multi_custom",
         "optimize_multi_custom",
     ),
@@ -120,7 +122,9 @@ _MODULE_EXPORTS = {
     ),
 }
 
-_SUBMODULES = tuple(_MODULE_EXPORTS) + ("merge_production",)
+_SUBMODULES = tuple(_MODULE_EXPORTS) + (
+    "arcsix_merge_production",
+)
 _EXPORT_TO_MODULE = {
     export: module_name
     for module_name, exports in _MODULE_EXPORTS.items()

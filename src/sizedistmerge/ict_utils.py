@@ -16,7 +16,7 @@ from typing import List, Optional, Sequence, Tuple, Union, Dict
 
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from io import StringIO
 
 __all__ = [
@@ -55,6 +55,20 @@ PathLike = Union[str, Path]
 
 # ─────────────────────────────── Small helpers ───────────────────────────────
 
+def _strip_timezone_metadata(value) -> pd.Timestamp:
+    """Parse one datetime-like value and drop timezone metadata without shifting clock time."""
+    ts = pd.to_datetime(value)
+    if isinstance(ts, pd.Timestamp) and ts.tzinfo is not None:
+        return ts.tz_localize(None)
+    return ts
+
+
+def _ensure_timezone_naive_index(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Return a DatetimeIndex with timezone metadata removed and clock values preserved."""
+    if idx.tz is not None:
+        return idx.tz_localize(None)
+    return idx
+
 def _instrument_from_filename(name: str) -> Optional[str]:
     """
     Generic instrument extraction:
@@ -67,16 +81,14 @@ def _instrument_from_filename(name: str) -> Optional[str]:
     head = name.split("_", 1)[0]
     return head.split("-", 1)[1] if "-" in head else head
 
-def parse_bound(x: Optional[Union[str, pd.Timestamp]], tz: str = "UTC") -> Optional[pd.Timestamp]:
-    """Parse a start/end bound into UTC."""
+def parse_bound(x: Optional[Union[str, pd.Timestamp]], tz: Optional[str] = None) -> Optional[pd.Timestamp]:
+    """Parse a start/end bound as timezone-naive wall-clock time.
+
+    The ``tz`` argument is kept for API compatibility and intentionally ignored.
+    """
     if x is None:
         return None
-    ts = pd.to_datetime(x)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize(tz)
-    else:
-        ts = ts.tz_convert(tz)
-    return ts.tz_convert("UTC")
+    return _strip_timezone_metadata(x)
 
 def _has_time_component(x: Optional[Union[str, pd.Timestamp]]) -> bool:
     """True if input includes a time-of-day (not just a date)."""
@@ -87,16 +99,12 @@ def _has_time_component(x: Optional[Union[str, pd.Timestamp]]) -> bool:
     ts = pd.to_datetime(x)
     return any([ts.hour, ts.minute, ts.second, ts.microsecond])
 
-def _local_day_bounds(x: Union[str, pd.Timestamp], tz: str) -> Tuple[pd.Timestamp, pd.Timestamp]:
-    """Return [day_start_local, day_end_local) converted to UTC."""
-    ts = pd.to_datetime(x)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize(tz)
-    else:
-        ts = ts.tz_convert(tz)
-    day0_local = ts.normalize()
-    day1_local = day0_local + pd.Timedelta(days=1)
-    return day0_local.tz_convert("UTC"), day1_local.tz_convert("UTC")
+def _local_day_bounds(x: Union[str, pd.Timestamp], tz: Optional[str] = None) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """Return timezone-naive [day_start, day_end) preserving the input clock date."""
+    ts = _strip_timezone_metadata(x)
+    day0 = ts.normalize()
+    day1 = day0 + pd.Timedelta(days=1)
+    return day0, day1
 
 def _ensure_time_column(df: pd.DataFrame, *, want_column: bool) -> pd.DataFrame:
     """Ensure time is present as a column (want_column=True) or index (want_column=False)."""
@@ -125,7 +133,7 @@ def _infer_meas_date(lines: List[str], path: Path) -> Optional[datetime]:
         if len(parts) == 6 and all(p.isdigit() for p in parts):
             y1, m1, d1, *_ = map(int, parts)
             try:
-                return datetime(y1, m1, d1, tzinfo=timezone.utc)
+                return datetime(y1, m1, d1)
             except Exception:
                 pass
     m = re.search(r"(\d{8})", path.name)
@@ -133,7 +141,7 @@ def _infer_meas_date(lines: List[str], path: Path) -> Optional[datetime]:
         ymd = m.group(1)
         y, mo, d = int(ymd[:4]), int(ymd[4:6]), int(ymd[6:])
         try:
-            return datetime(y, mo, d, tzinfo=timezone.utc)
+            return datetime(y, mo, d)
         except Exception:
             pass
     for s in lines[:300]:
@@ -142,7 +150,7 @@ def _infer_meas_date(lines: List[str], path: Path) -> Optional[datetime]:
             ymd = m.group(1)
             y, mo, d = int(ymd[:4]), int(ymd[4:6]), int(ymd[6:])
             try:
-                return datetime(y, mo, d, tzinfo=timezone.utc)
+                return datetime(y, mo, d)
             except Exception:
                 pass
     return None
@@ -172,7 +180,7 @@ def _read_table(lines: List[str]) -> pd.DataFrame:
 
 def _attach_time(df: pd.DataFrame, meas_date: Optional[datetime]) -> pd.DataFrame:
     """
-    Build UTC timestamps from Time_Mid or Time_Start with rollover handling.
+    Build timezone-naive timestamps from Time_Mid or Time_Start with rollover handling.
     Replace ICARTT sentinels with NaN (clean time column first).
     """
     # Choose time column
@@ -201,7 +209,7 @@ def _attach_time(df: pd.DataFrame, meas_date: Optional[datetime]) -> pd.DataFram
 
     # Epoch seconds?
     if np.nanmax(secs) >= 1e9:
-        times = pd.to_datetime(secs, unit="s", utc=True)
+        times = pd.to_datetime(secs, unit="s")
         df.insert(0, "time", times)
         return df
 
@@ -212,7 +220,7 @@ def _attach_time(df: pd.DataFrame, meas_date: Optional[datetime]) -> pd.DataFram
 
     rolls = np.r_[0, (np.diff(secs) < 0).astype(int)].cumsum()
     times = [meas_date + timedelta(days=int(rolls[i]), seconds=float(secs[i])) for i in range(secs.size)]
-    df.insert(0, "time", pd.to_datetime(times, utc=True))
+    df.insert(0, "time", pd.to_datetime(times))
     return df
 
 # ────────────────────── Bin metadata parsing & renaming ──────────────────────
@@ -375,8 +383,11 @@ def _extract_bin_meta_from_header(lines: List[str], instrument_hint: Optional[st
 
 # ─────────────────────────────── File picking ───────────────────────────────
 
-def _dates_from_bounds(start, end, tz="UTC") -> List[str]:
-    """Inclusive list of YYYYMMDD (UTC) covered by start..end."""
+def _dates_from_bounds(start, end, tz: Optional[str] = None) -> List[str]:
+    """Inclusive list of YYYYMMDD covered by timezone-naive start..end.
+
+    The ``tz`` argument is kept for API compatibility and intentionally ignored.
+    """
     t0, t1 = parse_bound(start, tz), parse_bound(end, tz)
     if t0 is None and t1 is None:
         raise ValueError("Provide start or end to infer date(s) when root is a directory.")
@@ -386,7 +397,7 @@ def _dates_from_bounds(start, end, tz="UTC") -> List[str]:
         t1 = t0
     if t1 < t0:
         t0, t1 = t1, t0
-    dates = pd.date_range(t0.normalize(), t1.normalize(), freq="D", tz="UTC")
+    dates = pd.date_range(t0.normalize(), t1.normalize(), freq="D")
     return [d.strftime("%Y%m%d") for d in dates]
 
 def _pattern(instrument: Optional[str], *, platform: Optional[str] = "P3B",
@@ -414,7 +425,7 @@ def pick_ict_files(
     *,
     start: Optional[Union[str, pd.Timestamp]] = None,
     end: Optional[Union[str, pd.Timestamp]] = None,
-    tz: str = "UTC",
+    tz: Optional[str] = None,
     instrument: Optional[str] = None,   # REQUIRED when root is a directory
     platform: Optional[str] = "P3B",
     exts: Sequence[str] = ("ict", "txt"),
@@ -465,7 +476,7 @@ def read_ict_file(
     start: Optional[Union[str, pd.Timestamp]] = None,
     end: Optional[Union[str, pd.Timestamp]] = None,
     *,
-    tz: str = "UTC",
+    tz: Optional[str] = None,
     make_index: bool = True,
     keep_time_col: bool = False,
 ) -> pd.DataFrame:
@@ -494,20 +505,20 @@ def read_ict_file(
     df.attrs["instrument"] = instr_key
 
     # Time subsetting
-    t0_utc = parse_bound(start, tz); t1_utc = parse_bound(end, tz)
-    single_day = ((start is None) != (end is None)) or (t0_utc is not None and t1_utc is not None and t0_utc == t1_utc)
+    t0 = parse_bound(start, tz); t1 = parse_bound(end, tz)
+    single_day = ((start is None) != (end is None)) or (t0 is not None and t1 is not None and t0 == t1)
     if "time" in df.columns:
         if single_day:
             base = start if start is not None else end
             day0, day1 = _local_day_bounds(base, tz)
             df = df[(df["time"] >= day0) & (df["time"] < day1)]
             if _has_time_component(base) and len(df):
-                target_utc = parse_bound(base, tz)
-                i = (df["time"] - target_utc).abs().values.argmin()
+                target_time = parse_bound(base, tz)
+                i = (df["time"] - target_time).abs().values.argmin()
                 df = df.iloc[[i]].copy()
         else:
-            if t0_utc is not None: df = df[df["time"] >= t0_utc]
-            if t1_utc is not None: df = df[df["time"] < t1_utc]
+            if t0 is not None: df = df[df["time"] >= t0]
+            if t1 is not None: df = df[df["time"] < t1]
 
     if make_index and "time" in df.columns:
         df = df.set_index("time")
@@ -533,7 +544,7 @@ def _read_multi(
     *,
     start: Optional[Union[str, pd.Timestamp]],
     end: Optional[Union[str, pd.Timestamp]],
-    tz: str,
+    tz: Optional[str],
     keep_time_col: bool,
     make_index: bool = True,
     standardize_bins: bool = False,
@@ -580,7 +591,7 @@ def read_ict(
     *,
     start: Optional[Union[str, pd.Timestamp]] = None,
     end: Optional[Union[str, pd.Timestamp]] = None,
-    tz: str = "UTC",
+    tz: Optional[str] = None,
     instrument: Optional[str] = None,
     platform: Optional[str] = "P3B",
     exts: Sequence[str] = ("ict", "txt"),
@@ -654,7 +665,7 @@ def read_ict_dir(
     # Defaults consistent with read_ict
     start = kwargs.pop("start", None)
     end = kwargs.pop("end", None)
-    tz = kwargs.pop("tz", "UTC")
+    tz = kwargs.pop("tz", None)
     keep_time_col = kwargs.pop("keep_time_col", False)
     make_index = kwargs.pop("make_index", True)
     standardize_bins = kwargs.pop("standardize_bins", False)
@@ -1040,14 +1051,12 @@ def check_common_grid(
     if not frames:
         raise ValueError("No frames provided.")
 
-    # normalize: ensure tz-aware & sorted
+    # normalize: ensure timezone-naive & sorted
     norm = {}
     for k, df in frames.items():
         if not isinstance(df.index, pd.DatetimeIndex):
             raise TypeError(f"{k}: index must be DatetimeIndex.")
-        idx = df.index
-        if idx.tz is None:
-            idx = idx.tz_localize("UTC")
+        idx = _ensure_timezone_naive_index(df.index)
         idx = idx.sort_values()
         if round_to:
             idx = idx.round(round_to)
@@ -1119,9 +1128,7 @@ def align_to_common_grid(
     for k, df in frames.items():
         if not isinstance(df.index, pd.DatetimeIndex):
             raise TypeError(f"{k}: index must be DatetimeIndex.")
-        idx = df.index
-        if idx.tz is None:
-            idx = idx.tz_localize("UTC")
+        idx = _ensure_timezone_naive_index(df.index)
         idx = idx.sort_values()
         if round_to:
             idx = idx.round(round_to)
@@ -1137,13 +1144,13 @@ def align_to_common_grid(
             g = None
             for df in norm.values():
                 g = df.index if g is None else g.intersection(df.index)
-            grid = g if g is not None else pd.DatetimeIndex([], tz="UTC")
+            grid = g if g is not None else pd.DatetimeIndex([])
 
         elif mode == "union":
             g = None
             for df in norm.values():
                 g = df.index if g is None else g.union(df.index)
-            grid = g if g is not None else pd.DatetimeIndex([], tz="UTC")
+            grid = g if g is not None else pd.DatetimeIndex([])
 
         elif mode == "ref":
             if ref_key is None or ref_key not in norm:
@@ -1155,14 +1162,20 @@ def align_to_common_grid(
                 raise ValueError("mode='span' requires freq (e.g., '1S').")
             tmin = min(df.index.min() for df in norm.values())
             tmax = max(df.index.max() for df in norm.values())
-            grid = pd.date_range(tmin, tmax, freq=freq, tz="UTC")
+            grid = pd.date_range(tmin, tmax, freq=freq)
         else:
             raise ValueError("mode must be one of: 'intersection', 'union', 'ref', 'span'.")
+    else:
+        grid = _ensure_timezone_naive_index(pd.DatetimeIndex(grid)).sort_values()
+        if round_to:
+            grid = grid.round(round_to)
+        if grid.has_duplicates:
+            grid = pd.DatetimeIndex(np.unique(grid.values))
 
     # If user also passed freq with a non-regular grid, densify onto that frequency
     if freq is not None and (mode in {"intersection", "union", "ref"} or grid is not None):
         if len(grid):
-            grid = pd.date_range(grid.min(), grid.max(), freq=freq, tz="UTC")
+            grid = pd.date_range(grid.min(), grid.max(), freq=freq)
 
     # --- reindex & interpolate ---
     aligned: Dict[str, pd.DataFrame] = {}
@@ -1206,17 +1219,27 @@ def filter_by_spectra_presence(
     if not frames:
         raise ValueError("No frames provided.")
 
+    norm: Dict[str, pd.DataFrame] = {}
+    for k, df in frames.items():
+        if isinstance(df.index, pd.DatetimeIndex):
+            idx = _ensure_timezone_naive_index(df.index)
+            tmp = df.copy()
+            tmp.index = idx
+            norm[k] = tmp
+        else:
+            norm[k] = df
+
     # Union time index across ALL frames (including CPC)
     union_idx = None
-    for df in frames.values():
+    for df in norm.values():
         union_idx = df.index if union_idx is None else union_idx.union(df.index)
     if union_idx is None:
-        union_idx = pd.DatetimeIndex([], tz="UTC")
+        union_idx = pd.DatetimeIndex([])
 
     # Determine which frames are spectral (have non-empty spectra)
     spectral_keys: List[str] = []
     spectra_cache: Dict[str, pd.DataFrame] = {}
-    for k, df in frames.items():
+    for k, df in norm.items():
         _, spec_df = get_spectra(df, col_prefix=col_prefix, long=False)
         spectra_cache[k] = spec_df
         if not spec_df.empty:
@@ -1238,6 +1261,9 @@ def filter_by_spectra_presence(
     if extra_masks:
         for k, extra in extra_masks.items():
             if k in mask_table:
+                if isinstance(extra.index, pd.DatetimeIndex):
+                    extra = extra.copy()
+                    extra.index = _ensure_timezone_naive_index(extra.index)
                 mask_table[k] = mask_table[k] & extra.reindex(union_idx).fillna(False).astype(bool)
 
     # Default threshold = number of *spectral* instruments
@@ -1253,7 +1279,7 @@ def filter_by_spectra_presence(
         keep_mask = mask_table.sum(axis=1) >= min_needed
 
     kept_index = union_idx[keep_mask]
-    filtered = {k: frames[k].loc[frames[k].index.intersection(kept_index)] for k in frames}
+    filtered = {k: norm[k].loc[norm[k].index.intersection(kept_index)] for k in norm}
     return filtered, keep_mask
 
 # --- inlet-flag helpers ---

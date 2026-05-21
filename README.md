@@ -1,123 +1,84 @@
-<!-- Top banner + right-aligned CSU logo (same pattern as your TAMU example) -->
-<a href="https://www.atmos.colostate.edu/" target="_blank"> <img src="assets/CSU-Rams-Head-Symbol-357.jpg" align="right" height="90" alt="Colorado State University Atmospheric Science"> </a>
+<a href="https://www.atmos.colostate.edu/" target="_blank">
+  <img src="assets/CSU-Rams-Head-Symbol-357.jpg" align="right" height="90" alt="Colorado State University Atmospheric Science">
+</a>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/release/python-3137/)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.12-blue.svg)](https://www.python.org/)
 [![Status](https://img.shields.io/badge/status-in%20development-orange.svg)]()
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17459971.svg)](https://doi.org/10.5281/zenodo.17459971)
 
 # SizeDistMerge
-Python toolkit for merging aerosol size distributions measured by different aerosol sizing instruments.
 
-If you use this code in your research, please **cite it using the DOI: https://zenodo.org/records/17459970**.
+SizeDistMerge is a Python toolkit for merging aerosol size distributions from
+multiple sizing instruments. It provides reusable tools for particle-size bin
+geometry, conservative spectrum remapping, aerodynamic-to-volume diameter
+conversion, OPC optical response lookup tables, overlap-based alignment, and
+smooth merged distributions on a common diameter grid.
 
-Code currently developed and maintained by [Kreidenweis Research Group](https://chem.atmos.colostate.edu/) at [Colorado State University](https://www.atmos.colostate.edu/). Collaboration welcome—issues and pull requests appreciated.
+The installable package is imported as:
+
+```python
+import sizedistmerge as sdm
+```
+
+ARCSIX campaign production code is kept outside the installable package in
+`arcsix_production/`.
+
+If you use this code in your research, please cite:
+<https://zenodo.org/records/17459970>
+
+SizeDistMerge is developed and maintained by the
+[Kreidenweis Research Group](https://chem.atmos.colostate.edu/) at
+[Colorado State University](https://www.atmos.colostate.edu/).
 
 ## Install
 
-SizeDistMerge is now structured as an installable Python package.
+Install from the repository root:
 
 ```bash
 python -m pip install -e .
 ```
 
-The package requires Python `>=3.12`. The optional `numba` dependency can be
-installed with:
+The package requires Python `>=3.12`.
+
+Optional `numba` support can be installed with:
 
 ```bash
 python -m pip install -e ".[numba]"
 ```
 
-## Basic Usage
-
-Reusable library functions are available from the top-level package:
+## Quick Start
 
 ```python
+import numpy as np
 import sizedistmerge as sdm
 
-edges = sdm.edges_from_mids_geometric([10, 20, 40])
-dv = sdm.da_to_dv(1000.0, rho_p=1000.0)
-lut = sdm.SigmaLUT(str(sdm.lut_path("uhsas")))
+mids_nm = np.array([10.0, 20.0, 40.0])
+edges_nm = sdm.edges_from_mids_geometric(mids_nm)
+
+dndlog = np.array([100.0, 80.0, 30.0])
+counts = sdm.counts_from_dndlog(dndlog, edges_nm=edges_nm)
+dndlog_again = sdm.dndlog_from_counts(counts, edges_nm=edges_nm)
+
+dv_nm = sdm.da_to_dv(1000.0, rho_p=1000.0)
+uhsas_lut = sdm.SigmaLUT(str(sdm.lut_path("uhsas")))
 ```
 
-The top-level API is intended for reusable size-distribution, diameter,
-optical/LUT, alignment, and merge utilities. Campaign production workflows are
-kept under explicit ARCSIX imports.
+Most reusable functions are available directly as `sdm.function(...)`. The
+submodules can also be imported when that is clearer:
 
-## Function And Module Guide
+```python
+from sizedistmerge import optical_diameter, combine
+```
 
-Most reusable functions are exported at the top level, so users can call
-functions such as `sdm.convert_do_lut(...)` after
-`import sizedistmerge as sdm`. The module paths below show where the
-implementation lives.
-
-### Map From The Old README
-
-The old README described the project by loose `src/*.py` files. Those files are
-now either packaged under `src/sizedistmerge/` or archived under
-`legacy_src_storage/`.
-
-- Old `optical_diameter_core.py` is now
-  `src/sizedistmerge/optical_diameter.py`. The old README's core functions are
-  still present as `sdm.make_monotone_sigma_interpolator()` and
-  `sdm.convert_do_lut()`. The same module also contains `sdm.POPSGeom`,
-  `sdm.UHSASGeom`, `sdm.SigmaLUT`, `sdm.pops_csca()`, `sdm.uhsas_csca()`,
-  and the POPS/UHSAS LUT builders.
-- Old `diameter_conversion_core.py` is now
-  `src/sizedistmerge/diameter_conversion.py`. The old README's APS remapping
-  function is still `sdm.da_to_dv()`, with `sdm.mean_free_path()` and
-  `sdm.cunningham()` as the supporting gas/drag corrections.
-- Old `sizedist_utils.py` is now `src/sizedistmerge/utils.py`. The important
-  helpers are the bin geometry functions, `dN/dlogDp` count conversions, and
-  count-conserving remapping functions listed below.
-- Old `sizedist_alignment.py` is now `src/sizedistmerge/alignment.py`. The
-  equivalent public functions are `sdm.mse_overlap_sizedist()`,
-  `sdm.objective_opc_vs_ref()`, `sdm.optimize_refractive_index_for_opc()`,
-  `sdm.objective_multi_custom()`, `sdm.optimize_multi_custom()`, and
-  `sdm.objective_joint_named_temporal()`.
-- Old `sizedist_combine.py` is now `src/sizedistmerge/combine.py`. The main
-  merge solvers are `sdm.merge_sizedists_tikhonov()` and
-  `sdm.merge_sizedists_tikhonov_consensus()`, with shared-grid and weighting
-  helpers listed below.
-- Old `ict_utils.py` is now `src/sizedistmerge/ict_utils.py`. The ICARTT
-  readers, instrument readers, spectra extraction, time handling, common-grid
-  alignment, and flag helpers are still reusable package code.
-- Old `sizedist_plot.py` is now `src/sizedistmerge/plot.py`, with
-  `sdm.plot_size_distributions()` and `sdm.plot_size_distributions_steps()`.
-- Old `kappa_kohler_theory.py` is now `src/sizedistmerge/kappa_kohler.py`.
-  The Petters and Kreidenweis equations, kappa retrieval helpers, wet/dry
-  diameter solvers, and growth-factor conversions are still exported.
-- Old `merge_production.py` is now
-  `arcsix_production/arcsix_merge_production.py`. It is intentionally loose
-  ARCSIX production code, not installable library API. Old v1/v2-style entry
-  points were consolidated into `run_arcsix_merge_for_periods()` plus
-  arguments such as `instruments=...` and `apply_alignment=...`.
-- Old `forward_kernel.py` and `twomey_inversion.py` are archived in
-  `legacy_src_storage/`. They were experimental Twomey/testing code and are
-  intentionally not part of the current public package API.
-
-Old ARCSIX production names were also consolidated:
-
-- `load_aufi_oneday()`, `load_aufi_oneday_v2()`, and `load_af_oneday()` map to
-  `load_arcsix_merge_frames_for_day()` for normal use. The lower-level readers
-  are `read_arcsix_merge_instruments_for_day()` and
-  `read_arcsix_aps_fims_for_day()`.
-- `make_filtered_specs_v2()` maps to `make_filtered_specs()`.
-- `run_joint_optimization_v2()` maps to `run_joint_optimization()`.
-- `make_consensus_merged_spec_v2()` maps to `make_consensus_merged_spec()`.
-- `write_day_netcdf_v2()` maps to `write_day_netcdf()`.
-- `run_arcsix_merge_for_periods_fims_aps_only()` maps to
-  `run_arcsix_merge_for_periods(..., instruments=("FIMS", "APS"),
-  apply_alignment=False)`.
-
-The archived Twomey/testing functions `K_tophat()`, `K_opc_from_lut()`,
-`apply_kernel_counts()`, and `twomey_inversion()` do not have current public
-package equivalents.
+## API Guide
 
 ### Size Distribution Utilities
 
-`src/sizedistmerge/utils.py` contains the core helpers for aerosol size
-distributions:
+Implementation: `src/sizedistmerge/utils.py`
+
+Use these functions to describe log-spaced bins, convert between
+`dN/dlogDp` and per-bin counts, and conservatively move spectra between grids.
 
 - Bin geometry: `edges_from_mids_geometric()`, `mids_from_edges()`,
   `delta_log10_from_edges()`, `select_between()`.
@@ -126,20 +87,28 @@ distributions:
 - Count-conserving remapping: `remap_dndlog_by_edges()`,
   `remap_dndlog_by_edges_any()`, `rebin_dndlog_by_edges_overlap()`.
 
+### Diameter Conversion
+
+Implementation: `src/sizedistmerge/diameter_conversion.py`
+
+Use `da_to_dv()` to convert aerodynamic diameter to volume-equivalent
+diameter, for example when APS bins need to be remapped using particle density
+and dynamic shape factor. Supporting helpers are `mean_free_path()` and
+`cunningham()`.
+
 ### Optical Diameter And LUTs
 
-`src/sizedistmerge/optical_diameter.py` contains the OPC optical response
-tools. It computes the relationship between particle diameter and scattering
-signal using Mie theory, integrated over the instrument collection geometry.
-POPS and UHSAS geometries are implemented.
+Implementation: `src/sizedistmerge/optical_diameter.py`
 
-The same module also builds and reads lookup tables of scattering response
-`sigma(D; m)` as a function of particle diameter and refractive index.
-`make_monotone_sigma_interpolator()` enforces a one-to-one response curve so
-diameter bin edges can be remapped between refractive indices. The main remap
-function is `convert_do_lut()`, which uses precomputed LUTs for speed.
+This module computes OPC optical response: particle diameter to scattering
+cross-section integrated over the collection geometry. POPS and UHSAS
+geometries are implemented. It also builds and reads lookup tables of
+`sigma(D; m)` as a function of particle diameter and complex refractive index.
 
-Important call points:
+The main remapping function is `convert_do_lut()`. It maps an optical diameter
+axis, usually bin edges, from a source refractive index to a target refractive
+index using a precomputed LUT. `make_monotone_sigma_interpolator()` enforces a
+one-to-one response curve so the mapping is invertible.
 
 - Instrument geometry: `POPSGeom`, `UHSASGeom`, `pops_geometry_cache()`,
   `uhsas_geometry_cache()`.
@@ -151,57 +120,45 @@ Important call points:
 - Constants: `POPS_WAVELENGTH_NM`, `UHSAS_WAVELENGTH_NM`, `RI_UHSAS_SRC`,
   `RI_POPS_SRC`.
 
-Packaged LUT paths are provided by `sdm.lut_path("pops")` and
+Packaged LUTs are available through `sdm.lut_path("pops")` and
 `sdm.lut_path("uhsas")`.
-
-### Diameter Conversion
-
-`src/sizedistmerge/diameter_conversion.py` contains `da_to_dv()`, which
-converts aerodynamic diameter to volume-equivalent diameter. This is used when
-APS bins need to be remapped based on particle density and dynamic shape
-factor. Supporting physics helpers are `mean_free_path()` and `cunningham()`.
 
 ### Alignment And Retrieved Parameters
 
-`src/sizedistmerge/alignment.py` contains overlap-cost and optimization
-routines for aligning size distributions. These functions remap bins, compare
-overlapping regions with mean squared error, and retrieve instrument-dependent
-parameters such as refractive index and APS density.
+Implementation: `src/sizedistmerge/alignment.py`
 
-Important call points:
+Use these functions to compare overlapping size-distribution regions and
+retrieve alignment parameters such as refractive index or APS density.
 
 - Overlap comparison: `mse_overlap_sizedist()`.
 - Single-OPC fitting: `objective_opc_vs_ref()`,
   `optimize_refractive_index_for_opc()`.
 - Multi-instrument fitting: `objective_multi_custom()`,
   `optimize_multi_custom()`.
-- Named temporal fitting for UHSAS/POPS/APS: `objective_joint_named_temporal()`,
+- Temporal fitting helpers: `objective_joint_named_temporal()`,
   `temporal_parameter_penalty()`.
 
 ### Merging Onto A Common Grid
 
-`src/sizedistmerge/combine.py` reconstructs a smooth merged aerosol size
-distribution from multiple instruments on a shared diameter grid. It contains
-the Tikhonov and consensus merge helpers.
+Implementation: `src/sizedistmerge/combine.py`
 
-Important call points:
+Use these functions to reconstruct a smooth aerosol size distribution from
+multiple instruments on a common diameter grid.
 
 - Grid and interpolation: `make_grid_from_series()`, `log_interp()`,
   `second_diff_nonuniform()`.
-- Uncertainty/weight helpers: `sigma_from_bands()`, `fractional_sigma()`,
+- Uncertainty and weights: `sigma_from_bands()`, `fractional_sigma()`,
   `compute_data_weights()`.
 - Merge solvers: `merge_sizedists_tikhonov()`,
   `merge_sizedists_tikhonov_consensus()`.
 
 ### ICARTT And Instrument Tables
 
-`src/sizedistmerge/ict_utils.py` reads ICARTT files and instrument tables,
-extracts size-bin metadata, handles spectra columns, aligns time grids, and
-provides shared time helpers. POPS, UHSAS, APS, FIMS, NMASS, inlet flag, and
-microphysical readers live here because those readers are reusable outside
-ARCSIX production.
+Implementation: `src/sizedistmerge/ict_utils.py`
 
-Important call points:
+These readers and table helpers are reusable outside ARCSIX production. They
+handle ICARTT files, instrument size-bin metadata, spectra columns, time grids,
+and flag segments.
 
 - Generic ICARTT reads: `read_ict()`, `read_ict_file()`, `read_ict_dir()`,
   `pick_ict_files()`, `parse_bound()`.
@@ -217,10 +174,9 @@ Important call points:
 
 ### Hygroscopicity
 
-`src/sizedistmerge/kappa_kohler.py` contains kappa-Kohler and hygroscopic
-growth utilities.
+Implementation: `src/sizedistmerge/kappa_kohler.py`
 
-Important call points:
+This module contains kappa-Kohler and hygroscopic growth utilities.
 
 - Petters and Kreidenweis equations: `kappa_petter_and_Kreidenweis_2010_EQ10()`,
   `Sc_petter_and_Kreidenweis_2010_EQ10()`,
@@ -238,25 +194,29 @@ Important call points:
 
 ### Plotting
 
-`src/sizedistmerge/plot.py` contains reusable plotting helpers for aerosol size
-distributions: `plot_size_distributions()` and
-`plot_size_distributions_steps()`.
+Implementation: `src/sizedistmerge/plot.py`
 
-### Package Data
+- `plot_size_distributions()`
+- `plot_size_distributions_steps()`
 
-`src/sizedistmerge/resources.py` contains `lut_path()`, which returns packaged
-POPS or UHSAS LUT paths. Use `sdm.lut_path("pops")` or
-`sdm.lut_path("uhsas")` instead of hard-coded relative paths.
+## ARCSIX Production Workflow
 
-### ARCSIX Production Code
+ARCSIX production is provided as a campaign-specific module outside the
+installable library API. Run it from the repository root:
 
-`arcsix_production/arcsix_merge_production.py` is loose campaign code, not part
-of the installable package. It contains the ARCSIX-specific production workflow:
-directory conventions, the FIMS/UHSAS/POPS/APS production combination,
-inlet/cloud filtering, batch logs, diagnostic plots, NetCDF writing,
-post-merge QC, and ICARTT conversion.
+```python
+import arcsix_production.arcsix_merge_production as mp
 
-Important call points:
+mp.run_arcsix_merge_for_periods(...)
+mp.run_post_merge_product_qc(...)
+mp.convert_qc_netcdf_to_icartt(...)
+```
+
+The production module handles ARCSIX directory conventions, the
+FIMS/UHSAS/POPS/APS production combination, inlet/cloud filtering, batch logs,
+diagnostic plots, NetCDF writing, post-merge QC, and ICARTT conversion.
+
+Important production call points:
 
 - Period construction: `load_arcsix_merge_frames_for_day()`, `split_frames()`,
   `periods_from_split_frames()`, `periods_from_frames()`,
@@ -274,64 +234,51 @@ Important call points:
   `run_post_merge_product_qc()`, `write_icartt_from_netcdf()`,
   `convert_qc_netcdf_to_icartt()`.
 
-## ARCSIX Production Workflow
+## Notebooks
 
-ARCSIX batch production, post-merge QC, and ICARTT conversion are kept as
-loose campaign code outside the installable package:
+Current package examples are in `notebooks/`:
 
-```python
-from pathlib import Path
-import importlib.util
-import sys
-
-production_path = Path("arcsix_production/arcsix_merge_production.py").resolve()
-spec = importlib.util.spec_from_file_location("arcsix_merge_production", production_path)
-mp = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mp
-spec.loader.exec_module(mp)
-
-mp.run_arcsix_merge_for_periods(...)
-mp.run_post_merge_product_qc(...)
-mp.convert_qc_netcdf_to_icartt(...)
-```
-
-The current package notebook
-`notebooks/arcsix_merge_1min_5min_package.ipynb` shows the 5-minute and
-1-minute ARCSIX recipes using the packaged API. The notebook keeps run-specific
-settings visible, while reusable mechanics live in `.py` modules.
-
-Small data-free API demos are in:
-
-- `notebooks/size_distribution_core_demo.ipynb`
-- `notebooks/optics_lut_demo.ipynb`
+- `size_distribution_core_demo.ipynb` - data-free demo for core bin and
+  remapping utilities.
+- `optics_lut_demo.ipynb` - data-free demo for packaged POPS/UHSAS LUT usage.
+- `arcsix_merge_1min_5min_package.ipynb` - ARCSIX 1-minute and 5-minute
+  production recipe using the packaged library and campaign production module.
 
 ## Package Layout
 
-The import package is under `src/sizedistmerge/`:
-
-- `utils.py` - size-bin geometry, `dN/dlogDp` conversions, and count-conserving remapping.
-- `diameter_conversion.py` - aerodynamic-to-volume-equivalent diameter conversion.
-- `kappa_kohler.py` - kappa-Kohler and hygroscopic-growth utilities.
-- `optical_diameter.py` - POPS/UHSAS Mie-response geometry, LUT builders, and optical diameter remapping.
-- `alignment.py` - MSE overlap objectives, RI/density optimization, and temporal regularization helpers.
-- `combine.py` - Tikhonov and consensus merge routines on common grids.
-- `ict_utils.py` - ICARTT readers, instrument table helpers, and shared time handling.
-- `plot.py` - size-distribution plotting helpers.
-- `resources.py` - package-data lookup helpers such as `sdm.lut_path(...)`.
-
-Old flat scripts are stored separately under `legacy_src_storage/` for
-reference. Old exploratory notebooks are kept locally under
-`legacy_notebooks/` and are intentionally ignored by git. New code should
-import reusable utilities from `sizedistmerge`. ARCSIX campaign production
-lives outside the package in `arcsix_production/arcsix_merge_production.py`.
+- `src/sizedistmerge/utils.py` - bin geometry, `dN/dlogDp` conversions, and
+  count-conserving remapping.
+- `src/sizedistmerge/diameter_conversion.py` - aerodynamic-to-volume diameter
+  conversion.
+- `src/sizedistmerge/optical_diameter.py` - POPS/UHSAS optical response,
+  LUT builders, and optical diameter remapping.
+- `src/sizedistmerge/alignment.py` - overlap objectives, RI/density
+  optimization, and temporal regularization helpers.
+- `src/sizedistmerge/combine.py` - Tikhonov and consensus merge routines.
+- `src/sizedistmerge/ict_utils.py` - ICARTT readers, instrument table helpers,
+  spectra extraction, and shared time handling.
+- `src/sizedistmerge/kappa_kohler.py` - kappa-Kohler and hygroscopic growth
+  utilities.
+- `src/sizedistmerge/plot.py` - reusable size-distribution plotting.
+- `src/sizedistmerge/resources.py` - package-data lookup helpers such as
+  `sdm.lut_path(...)`.
+- `arcsix_production/arcsix_merge_production.py` - ARCSIX-specific production,
+  product QC, and ICARTT conversion.
 
 ## Packaged LUT Data
 
-The POPS and UHSAS LUTs are packaged inside the wheel under
-`src/sizedistmerge/data/lut/`:
+The package includes POPS and UHSAS LUTs under `src/sizedistmerge/data/lut/`:
 
 - `pops_sigma_col_405nm.zarr`
 - `uhsas_sigma_col_1054nm.zarr`
 
-Use `sdm.lut_path("pops")` or `sdm.lut_path("uhsas")` instead of hard-coded
-relative paths.
+Use:
+
+```python
+pops_lut_path = sdm.lut_path("pops")
+uhsas_lut_path = sdm.lut_path("uhsas")
+```
+
+## License
+
+This project is distributed under the MIT license. See `LICENSE.txt`.

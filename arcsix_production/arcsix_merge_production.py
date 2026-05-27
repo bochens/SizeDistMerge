@@ -19,6 +19,7 @@ from sizedistmerge.ict_utils import (
     mean_spectrum,
     read_aps,
     read_fims,
+    read_ict,
     read_inlet_flag,
     read_microphysical,
     read_pops,
@@ -35,7 +36,13 @@ from sizedistmerge.utils import (
     select_between,
 )
 from sizedistmerge.alignment import optimize_multi_custom
-from sizedistmerge.optical_diameter import SigmaLUT, convert_do_lut, RI_UHSAS_SRC, RI_POPS_SRC
+from sizedistmerge.optical_diameter import (
+    SigmaLUT,
+    convert_do_lut,
+    make_monotone_sigma_interpolator,
+    RI_UHSAS_SRC,
+    RI_POPS_SRC,
+)
 from sizedistmerge.diameter_conversion import da_to_dv
 from sizedistmerge.combine import make_grid_from_series, merge_sizedists_tikhonov, merge_sizedists_tikhonov_consensus
 from sizedistmerge.plot import plot_size_distributions, plot_size_distributions_steps
@@ -43,6 +50,7 @@ from sizedistmerge.resources import lut_path
 
 __all__ = [
     "DEFAULT_TEMPORAL_PRIOR_PARAMS",
+    "read_putls_merge_reference_for_day",
     "load_arcsix_merge_frames_for_day",
     "split_frames",
     "periods_from_split_frames",
@@ -1331,28 +1339,99 @@ def _build_temporal_arrays(
     return np.asarray(targets, dtype=float), np.asarray(weights, dtype=float)
 
 
-def read_arcsix_merge_instruments_for_day(a_date, aps_dir, fims_dir, *, uhsas_dir=None, pops_dir=None):
-    """Read and filter one ARCSIX day for the standard merge instrument set."""
-    frames = {
-        "APS": read_aps(aps_dir, start=a_date, end=None, prefix="ARCSIX"),
-        "FIMS": read_fims(fims_dir, start=a_date, end=None, prefix="ARCSIX"),
+def _format_diameter_label(value: float) -> str:
+    return f"{float(value):.12f}".rstrip("0").rstrip(".")
+
+
+def _putls_reference_columns(mids_nm: np.ndarray) -> list[str]:
+    return [f"dNdlogDp_d{_format_diameter_label(mid)}nm" for mid in mids_nm]
+
+
+def read_putls_merge_reference_for_day(data_dir, a_date, *, cutoff_nm: float = 300.0) -> pd.DataFrame:
+    """
+    Read the ARCSIX PUTLS-MERGE product as a low-size reference spectrum.
+
+    The cutoff is applied by complete source bins: only bins whose upper edge is
+    at or below ``cutoff_nm`` are kept.
+    """
+    data_dir = Path(data_dir)
+    putls_dir = data_dir if data_dir.name == "ARCSIX-PUTLS-MERGE" else data_dir / "ARCSIX-PUTLS-MERGE"
+    df = read_ict(
+        putls_dir,
+        start=a_date,
+        end=None,
+        instrument="PUTLS-MERGE",
+        prefix="ARCSIX",
+        standardize_bins=True,
+        col_prefix="dNdlogDp",
+    )
+    df = drop_timezone_from_index(df)
+    if df.empty:
+        return df
+
+    meta = df.attrs.get("bin_meta") or {}
+    lower = np.asarray(meta.get("lower_nm", []), dtype=float)
+    upper = np.asarray(meta.get("upper_nm", []), dtype=float)
+    mids = np.asarray(meta.get("mid_nm", []), dtype=float)
+    if lower.size == 0 or upper.size == 0 or mids.size == 0:
+        raise ValueError("PUTLS-MERGE reference is missing bin edge metadata.")
+
+    n_bin = min(lower.size, upper.size, mids.size)
+    lower = lower[:n_bin]
+    upper = upper[:n_bin]
+    mids = mids[:n_bin]
+    keep = upper <= float(cutoff_nm)
+    if not np.any(keep):
+        raise ValueError(f"PUTLS-MERGE has no complete bins with upper edge <= {cutoff_nm} nm.")
+
+    cols = _putls_reference_columns(mids)
+    missing = [col for col in cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"PUTLS-MERGE labeled spectra columns are missing: {missing[:3]}")
+
+    out = df.loc[:, [col for col, use in zip(cols, keep) if use]].copy()
+    out.attrs["instrument"] = "PUTLS-MERGE"
+    out.attrs["bin_meta"] = {
+        "lower_nm": lower[keep].tolist(),
+        "upper_nm": upper[keep].tolist(),
+        "mid_nm": mids[keep].tolist(),
     }
+    if "dlogD" in meta:
+        dlog = np.asarray(meta["dlogD"], dtype=float)[:n_bin]
+        out.attrs["bin_meta"]["dlogD"] = dlog[keep].tolist()
+    return out
+
+
+def read_arcsix_merge_instruments_for_day(a_date, aps_dir, fims_dir, *, uhsas_dir=None, pops_dir=None, require_fims=True):
+    """Read and filter one ARCSIX day for the standard merge instrument set."""
+    frames = {"APS": read_aps(aps_dir, start=a_date, end=None, prefix="ARCSIX")}
+    try:
+        fims = read_fims(fims_dir, start=a_date, end=None, prefix="ARCSIX")
+    except FileNotFoundError:
+        if require_fims:
+            raise
+        fims = pd.DataFrame()
+    if fims is not None and not fims.empty:
+        frames["FIMS"] = fims
     if uhsas_dir is not None:
         frames["UHSAS"] = read_uhsas(uhsas_dir, start=a_date, end=None, prefix="ARCSIX")
     if pops_dir is not None:
         frames["POPS"] = read_pops(pops_dir, start=a_date, end=None, prefix="ARCSIX")
 
     frames = {k: v for k, v in frames.items() if v is not None and not v.empty}
-    if "FIMS" not in frames:
+    if require_fims and "FIMS" not in frames:
         return {}
 
-    _ = check_common_grid(frames, ref_key="FIMS", round_to=None)
+    if "FIMS" in frames:
+        _ = check_common_grid(frames, ref_key="FIMS", round_to=None)
 
-    fims_qc = pd.to_numeric(
-        frames["FIMS"].get("QC_Flag", pd.Series(index=frames["FIMS"].index)),
-        errors="coerce",
-    )
-    extra = {"FIMS": fims_qc.ne(2)}
+    extra = None
+    if "FIMS" in frames:
+        fims_qc = pd.to_numeric(
+            frames["FIMS"].get("QC_Flag", pd.Series(index=frames["FIMS"].index)),
+            errors="coerce",
+        )
+        extra = {"FIMS": fims_qc.ne(2)}
     filtered, _keep = filter_by_spectra_presence(
         frames,
         col_prefix="dNdlogDp",
@@ -1890,13 +1969,39 @@ def _resolve_lut_path(lut_dir: str | Path | None, kind: str, filename: str) -> P
 
 def _load_uhsas_lut(lut_dir: str | Path | None):
     path = _resolve_lut_path(lut_dir, "uhsas", "uhsas_sigma_col_1054nm.zarr")
-    return SigmaLUT(str(path))
+    return _sigma_lut_from_path(path)
 
 def _load_pops_lut(lut_dir: str | Path | None):
     path = _resolve_lut_path(lut_dir, "pops", "pops_sigma_col_405nm.zarr")
-    return SigmaLUT(str(path))
+    return _sigma_lut_from_path(path)
 
-def _uhsas_remap_fn(edges, theta, *, lut, ri_src, k=0, response_bins=50):
+
+_SIGMA_LUT_CACHE = {}
+
+
+def _sigma_lut_from_path(path: Path):
+    key = str(Path(path).resolve())
+    lut = _SIGMA_LUT_CACHE.get(key)
+    if lut is None:
+        lut = SigmaLUT(key)
+        _SIGMA_LUT_CACHE[key] = lut
+    return lut
+
+
+def _make_source_sigma_fn(lut: SigmaLUT, ri_src, *, response_bins=50):
+    n = float(np.real(ri_src))
+    k = float(np.imag(ri_src))
+    sigma_src = lut.sigma_curve(lut.Dg, n, k)
+    source_sigma_fn, _ = make_monotone_sigma_interpolator(
+        lut.Dg,
+        sigma_src,
+        response_bins=response_bins,
+        increasing=True,
+    )
+    return source_sigma_fn
+
+
+def _uhsas_remap_fn(edges, theta, *, lut, ri_src, k=0, response_bins=50, source_sigma_fn=None):
     n = float(theta[0])
     return convert_do_lut(
         Do_nm=edges,
@@ -1904,14 +2009,15 @@ def _uhsas_remap_fn(edges, theta, *, lut, ri_src, k=0, response_bins=50):
         ri_dst=complex(n, k),
         lut=lut,
         response_bins=response_bins,
+        source_sigma_fn=source_sigma_fn,
     )
 
-def _pops_remap_fn(edges, theta, *, lut, ri_src, k=0, response_bins=50):
+def _pops_remap_fn(edges, theta, *, lut, ri_src, k=0, response_bins=50, source_sigma_fn=None):
     """Mirror of _uhsas_remap_fn for POPS."""
     n = float(theta[0])
     return convert_do_lut(
         Do_nm=edges, ri_src=ri_src, ri_dst=complex(n, k),
-        lut=lut, response_bins=response_bins,
+        lut=lut, response_bins=response_bins, source_sigma_fn=source_sigma_fn,
     )
 
 
@@ -1991,6 +2097,10 @@ def run_joint_optimization(
     temporal_w_rho: float = 0.0,
     prev_params=None,
     smooth_rho: bool = True,
+    optimizer_maxiter: int = 200,
+    optimizer_tol: float = 1e-6,
+    optimizer_popsize: int = 15,
+    optimizer_polish: bool = True,
 ):
     """
     Jointly optimize loaded OPC/APS instruments against FIMS.
@@ -2005,6 +2115,12 @@ def run_joint_optimization(
     w_uhsas = _nonnegative_float(w_uhsas, "w_uhsas")
     w_pops = _nonnegative_float(w_pops, "w_pops")
     w_aps = _nonnegative_float(w_aps, "w_aps")
+    optimizer_maxiter = int(optimizer_maxiter)
+    optimizer_popsize = int(optimizer_popsize)
+    if optimizer_maxiter < 1:
+        raise ValueError("optimizer_maxiter must be >= 1")
+    if optimizer_popsize < 1:
+        raise ValueError("optimizer_popsize must be >= 1")
 
     if pops_bounds is None:
         pops_bounds = uhsas_bounds
@@ -2032,6 +2148,7 @@ def run_joint_optimization(
             m_UHSAS, e_UHSAS, y_UHSAS, s_UHSAS, xmin=uhsas_xmin, xmax=uhsas_xmax
         )
         lut_uhsas = _load_uhsas_lut(lut_dir)
+        source_sigma_fn = _make_source_sigma_fn(lut_uhsas, RI_UHSAS_SRC, response_bins=50)
         selected["UHSAS"] = (e_sel, y_sel, s_sel, lut_uhsas)
         instruments.append(
             {
@@ -2039,7 +2156,12 @@ def run_joint_optimization(
                 "y": y_sel,
                 "w_ref": w_uhsas,
                 "remap_fn": _uhsas_remap_fn,
-                "kwargs": {"lut": lut_uhsas, "ri_src": RI_UHSAS_SRC, "response_bins": 50},
+                "kwargs": {
+                    "lut": lut_uhsas,
+                    "ri_src": RI_UHSAS_SRC,
+                    "response_bins": 50,
+                    "source_sigma_fn": source_sigma_fn,
+                },
             }
         )
         bounds_list.append(list(uhsas_bounds))
@@ -2051,6 +2173,7 @@ def run_joint_optimization(
             m_POPS, e_POPS, y_POPS, s_POPS, xmin=pops_xmin, xmax=pops_xmax
         )
         lut_pops = _load_pops_lut(lut_dir)
+        source_sigma_fn = _make_source_sigma_fn(lut_pops, pops_ri_src, response_bins=50)
         selected["POPS"] = (e_sel, y_sel, s_sel, lut_pops)
         instruments.append(
             {
@@ -2058,7 +2181,12 @@ def run_joint_optimization(
                 "y": y_sel,
                 "w_ref": w_pops,
                 "remap_fn": _pops_remap_fn,
-                "kwargs": {"lut": lut_pops, "ri_src": pops_ri_src, "response_bins": 50},
+                "kwargs": {
+                    "lut": lut_pops,
+                    "ri_src": pops_ri_src,
+                    "response_bins": 50,
+                    "source_sigma_fn": source_sigma_fn,
+                },
             }
         )
         bounds_list.append(list(pops_bounds))
@@ -2108,8 +2236,10 @@ def run_joint_optimization(
         pair_weights=pair_weights if pair_weights else None,
         temporal_target=temporal_target,
         temporal_weights=temporal_weights,
-        maxiter=200,
-        tol=1e-6,
+        maxiter=optimizer_maxiter,
+        tol=float(optimizer_tol),
+        popsize=optimizer_popsize,
+        polish=optimizer_polish,
         seed=123,
     )
 
@@ -2433,20 +2563,33 @@ def write_day_netcdf(
     day_n_fit: list[float],
     day_rho_fit: list[float],
     day_best_cost: list[float],
+    day_period_idx: list[int] | None = None,
+    day_chunk_number: list[int] | None = None,
+    day_reference_source_flag: list[int] | None = None,
     day_pops_algn: list[np.ndarray] | None = None,
     day_n_pops_fit: list[float] | None = None,
     orig_APS_edges: np.ndarray | None = None,
     orig_UHSAS_edges: np.ndarray | None = None,
     orig_POPS_edges: np.ndarray | None = None,
     orig_FIMS_edges: np.ndarray | None = None,
+    atomic: bool = True,
 ):
     nc_path = day_dir / f"{a_date}_sizedist_merged.nc"
+    write_path = nc_path.with_suffix(nc_path.suffix + ".tmp") if atomic else nc_path
+    if atomic and write_path.exists():
+        write_path.unlink()
 
     n_chunk = len(day_fine_vals)
     n_fine  = len(day_fine_edges) - 1 if day_fine_edges is not None else 0
     has_pops = day_pops_algn is not None
     if has_pops and day_n_pops_fit is None:
         day_n_pops_fit = [np.nan] * n_chunk
+    if day_period_idx is None:
+        day_period_idx = [-1] * n_chunk
+    if day_chunk_number is None:
+        day_chunk_number = list(range(n_chunk))
+    if day_reference_source_flag is None:
+        day_reference_source_flag = [0] * n_chunk
 
     t_start_strs = [str(t) if (t is not None and pd.notna(t)) else "" for t in day_times_start]
     t_end_strs   = [str(t) if (t is not None and pd.notna(t)) else "" for t in day_times_end]
@@ -2473,8 +2616,8 @@ def write_day_netcdf(
         else:
             end_since.append(np.nan)
 
-    with Dataset(nc_path, "w") as nc:
-        nc.createDimension("chunk", n_chunk)
+    with Dataset(write_path, "w") as nc:
+        nc.createDimension("chunk", None)
         nc.createDimension("fine_bin", n_fine)
         nc.createDimension("fine_edge", n_fine + 1)
 
@@ -2508,6 +2651,18 @@ def write_day_netcdf(
         v_t0.units = "s"
         v_t1.long_name = "chunk end time since base_time_iso"
         v_t1.units = "s"
+
+        v_period = nc.createVariable("period_idx", "i4", ("chunk",))
+        v_period[:] = np.asarray(day_period_idx, int)
+        v_period.long_name = "Index of the requested input time period"
+
+        v_chunk = nc.createVariable("chunk_number", "i4", ("chunk",))
+        v_chunk[:] = np.asarray(day_chunk_number, int)
+        v_chunk.long_name = "Loop chunk number within this day"
+
+        v_ref = nc.createVariable("reference_source_flag", "i4", ("chunk",))
+        v_ref[:] = np.asarray(day_reference_source_flag, int)
+        v_ref.long_name = "Reference spectrum source: 0 = FIMS, 1 = PUTLS-MERGE"
 
         v_fe = nc.createVariable("fine_edges_nm", "f8", ("fine_edge",))
         v_fe[:] = day_fine_edges
@@ -2592,6 +2747,190 @@ def write_day_netcdf(
         nc.source = "arcsix_merge_production.write_day_netcdf"
         nc.conventions = "CF-1.8 (partial)"
 
+    if atomic:
+        write_path.replace(nc_path)
+    return nc_path
+
+
+def _read_optional_nc_var(ds: Dataset, name: str):
+    if name not in ds.variables:
+        return None
+    return np.asarray(ds.variables[name][:])
+
+
+def _load_day_netcdf_checkpoint(nc_path: Path, *, include_pops: bool) -> dict | None:
+    if not nc_path.exists():
+        return None
+
+    with Dataset(nc_path) as ds:
+        if "period_idx" not in ds.variables:
+            raise RuntimeError(
+                f"{nc_path} is not resumable because it has no period_idx variable. "
+                "Move it aside or rerun with a fresh output directory."
+            )
+
+        n_chunk = len(ds.dimensions["chunk"]) if "chunk" in ds.dimensions else 0
+        if n_chunk == 0:
+            return None
+
+        base = pd.Timestamp(_parse_base_time(ds))
+        start_s = np.asarray(ds.variables["time_start_since_base_s"][:], float)
+        end_s = np.asarray(ds.variables["time_end_since_base_s"][:], float)
+
+        starts = [base + pd.Timedelta(seconds=float(s)) if np.isfinite(s) else pd.NaT for s in start_s]
+        ends = [base + pd.Timedelta(seconds=float(s)) if np.isfinite(s) else pd.NaT for s in end_s]
+
+        data = {
+            "common_edges": np.asarray(ds.variables["fine_edges_nm"][:], float),
+            "fims": np.asarray(ds.variables["fims_aligned_dNdlogDp"][:], float),
+            "uhsas": np.asarray(ds.variables["uhsas_aligned_dNdlogDp"][:], float),
+            "aps": np.asarray(ds.variables["aps_aligned_dNdlogDp"][:], float),
+            "merged": np.asarray(ds.variables["merged_dNdlogDp"][:], float),
+            "times_start": starts,
+            "times_end": ends,
+            "incloud": np.asarray(ds.variables["inlet_incloud_flag"][:], int),
+            "n_fit": np.asarray(ds.variables["retrieved_uhsas_n_fit"][:], float),
+            "rho_fit": np.asarray(ds.variables["retrieved_aps_density"][:], float),
+            "best_cost": np.asarray(ds.variables["optimization_best_cost"][:], float),
+            "period_idx": np.asarray(ds.variables["period_idx"][:], int),
+            "chunk_number": np.asarray(ds.variables["chunk_number"][:], int)
+            if "chunk_number" in ds.variables
+            else np.arange(len(start_s), dtype=int),
+            "reference_source_flag": np.asarray(ds.variables["reference_source_flag"][:], int)
+            if "reference_source_flag" in ds.variables
+            else np.zeros(len(start_s), dtype=int),
+            "orig_APS_edges": _read_optional_nc_var(ds, "aps_edges_nm"),
+            "orig_UHSAS_edges": _read_optional_nc_var(ds, "uhsas_edges_nm"),
+            "orig_POPS_edges": _read_optional_nc_var(ds, "pops_edges_nm"),
+            "orig_FIMS_edges": _read_optional_nc_var(ds, "fims_edges_nm"),
+        }
+        if include_pops:
+            if "pops_aligned_dNdlogDp" not in ds.variables or "retrieved_pops_n_fit" not in ds.variables:
+                raise RuntimeError(f"{nc_path} does not contain POPS variables required for this run.")
+            data["pops"] = np.asarray(ds.variables["pops_aligned_dNdlogDp"][:], float)
+            data["n_pops_fit"] = np.asarray(ds.variables["retrieved_pops_n_fit"][:], float)
+        else:
+            data["pops"] = np.empty((0, data["merged"].shape[1]), dtype=float)
+            data["n_pops_fit"] = np.empty(0, dtype=float)
+
+    return data
+
+
+def _extend_list_from_array(dst: list, arr) -> None:
+    for row in np.asarray(arr):
+        dst.append(np.asarray(row, float))
+
+
+def _list_attr(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]
+
+
+def append_day_netcdf_checkpoint(
+    day_dir: Path,
+    a_date: str,
+    *,
+    fine_edges: np.ndarray,
+    fims_aligned: np.ndarray,
+    uhsas_aligned: np.ndarray,
+    aps_aligned: np.ndarray,
+    merged: np.ndarray,
+    t_start,
+    t_end,
+    incloud_flag: int,
+    n_fit: float,
+    rho_fit: float,
+    best_cost: float,
+    period_idx: int,
+    chunk_number: int,
+    reference_source_flag: int = 0,
+    pops_aligned: np.ndarray | None = None,
+    n_pops_fit: float | None = None,
+    orig_APS_edges: np.ndarray | None = None,
+    orig_UHSAS_edges: np.ndarray | None = None,
+    orig_POPS_edges: np.ndarray | None = None,
+    orig_FIMS_edges: np.ndarray | None = None,
+) -> Path:
+    nc_path = day_dir / f"{a_date}_sizedist_merged.nc"
+    fine_edges = np.asarray(fine_edges, float)
+    n_fine = fine_edges.size - 1
+    has_pops = pops_aligned is not None
+
+    if not nc_path.exists():
+        write_day_netcdf(
+            day_dir,
+            a_date,
+            day_fine_edges=fine_edges,
+            day_fims_algn=np.empty((0, n_fine), dtype=float),
+            day_uhsas_algn=np.empty((0, n_fine), dtype=float),
+            day_pops_algn=np.empty((0, n_fine), dtype=float) if has_pops else None,
+            day_aps_algn=np.empty((0, n_fine), dtype=float),
+            day_fine_vals=np.empty((0, n_fine), dtype=float),
+            day_times_start=[],
+            day_times_end=[],
+            day_incloud_flag=[],
+            day_n_fit=[],
+            day_n_pops_fit=[] if has_pops else None,
+            day_rho_fit=[],
+            day_best_cost=[],
+            day_period_idx=[],
+            day_chunk_number=[],
+            day_reference_source_flag=[],
+            orig_APS_edges=orig_APS_edges,
+            orig_UHSAS_edges=orig_UHSAS_edges,
+            orig_POPS_edges=orig_POPS_edges if has_pops else None,
+            orig_FIMS_edges=orig_FIMS_edges,
+            atomic=False,
+        )
+
+    with Dataset(nc_path, "a") as nc:
+        existing_edges = np.asarray(nc.variables["fine_edges_nm"][:], float)
+        if existing_edges.shape != fine_edges.shape or not np.allclose(existing_edges, fine_edges):
+            raise RuntimeError(f"{nc_path} checkpoint fine grid does not match current chunk.")
+
+        row = len(nc.dimensions["chunk"])
+        t_start_str = str(t_start) if t_start is not None and pd.notna(t_start) else ""
+        t_end_str = str(t_end) if t_end is not None and pd.notna(t_end) else ""
+
+        if "base_time_iso" not in nc.ncattrs():
+            base_dt = pd.to_datetime(t_start_str)
+            nc.base_time_iso = base_dt.isoformat()
+        else:
+            base_dt = pd.to_datetime(str(nc.getncattr("base_time_iso")))
+
+        nc.time_start_list = _list_attr(getattr(nc, "time_start_list", None)) + [t_start_str]
+        nc.time_end_list = _list_attr(getattr(nc, "time_end_list", None)) + [t_end_str]
+
+        start_dt = pd.to_datetime(t_start_str)
+        end_dt = pd.to_datetime(t_end_str)
+        nc.variables["time_start_since_base_s"][row] = (start_dt - base_dt).total_seconds()
+        nc.variables["time_end_since_base_s"][row] = (end_dt - base_dt).total_seconds()
+        nc.variables["period_idx"][row] = int(period_idx)
+        nc.variables["chunk_number"][row] = int(chunk_number)
+        if "reference_source_flag" not in nc.variables:
+            v_ref = nc.createVariable("reference_source_flag", "i4", ("chunk",))
+            if row > 0:
+                v_ref[:row] = np.zeros(row, dtype=int)
+            v_ref.long_name = "Reference spectrum source: 0 = FIMS, 1 = PUTLS-MERGE"
+        nc.variables["reference_source_flag"][row] = int(reference_source_flag)
+        nc.variables["fims_aligned_dNdlogDp"][row, :] = np.asarray(fims_aligned, float)
+        nc.variables["uhsas_aligned_dNdlogDp"][row, :] = np.asarray(uhsas_aligned, float)
+        if has_pops:
+            if "pops_aligned_dNdlogDp" not in nc.variables:
+                raise RuntimeError(f"{nc_path} checkpoint was created without POPS variables.")
+            nc.variables["pops_aligned_dNdlogDp"][row, :] = np.asarray(pops_aligned, float)
+            nc.variables["retrieved_pops_n_fit"][row] = float(n_pops_fit)
+        nc.variables["aps_aligned_dNdlogDp"][row, :] = np.asarray(aps_aligned, float)
+        nc.variables["merged_dNdlogDp"][row, :] = np.asarray(merged, float)
+        nc.variables["inlet_incloud_flag"][row] = int(incloud_flag)
+        nc.variables["retrieved_uhsas_n_fit"][row] = float(n_fit)
+        nc.variables["retrieved_aps_density"][row] = float(rho_fit)
+        nc.variables["optimization_best_cost"][row] = float(best_cost)
+        nc.sync()
+
     return nc_path
 
 
@@ -2637,6 +2976,15 @@ def run_arcsix_merge_for_periods(
     consensus_c=1.0,
     consensus_data_space="linear",
     output_edges=None,
+    resume=True,
+    checkpoint_netcdf=True,
+    save_time_series_plots=True,
+    save_loss_plots=True,
+    save_merge_plots=True,
+    optimizer_maxiter=200,
+    optimizer_tol=1e-6,
+    optimizer_popsize=15,
+    optimizer_polish=True,
 ):
     """
     Run ARCSIX aerosol size distribution merge for a list of specified time periods.
@@ -2693,6 +3041,13 @@ def run_arcsix_merge_for_periods(
             alpha_fims=1.0,
             aps_combine_weight=aps_combine_weight,
         )
+
+    optimizer_maxiter = int(optimizer_maxiter)
+    optimizer_popsize = int(optimizer_popsize)
+    if optimizer_maxiter < 1:
+        raise ValueError("optimizer_maxiter must be >= 1")
+    if optimizer_popsize < 1:
+        raise ValueError("optimizer_popsize must be >= 1")
 
     # instrument subdirs
     aps_dir   = data_dir / "LARGE-APS"
@@ -2807,6 +3162,15 @@ def run_arcsix_merge_for_periods(
             f.write(f"SMOOTHNESS_LAM: {smoothness_lam}\n")
             f.write(f"CONSENSUS_C: {consensus_c}\n")
             f.write(f"CONSENSUS_DATA_SPACE: {consensus_data_space}\n")
+            f.write(f"RESUME: {resume}\n")
+            f.write(f"CHECKPOINT_NETCDF: {checkpoint_netcdf}\n")
+            f.write(f"SAVE_TIME_SERIES_PLOTS: {save_time_series_plots}\n")
+            f.write(f"SAVE_LOSS_PLOTS: {save_loss_plots}\n")
+            f.write(f"SAVE_MERGE_PLOTS: {save_merge_plots}\n")
+            f.write(f"OPTIMIZER_MAXITER: {optimizer_maxiter}\n")
+            f.write(f"OPTIMIZER_TOL: {optimizer_tol}\n")
+            f.write(f"OPTIMIZER_POPSIZE: {optimizer_popsize}\n")
+            f.write(f"OPTIMIZER_POLISH: {optimizer_polish}\n")
             output_edges_desc = (
                 f"{output_edges_arr.size - 1} bins from {output_edges_arr[0]} to {output_edges_arr[-1]} nm"
                 if output_edges_arr is not None
@@ -2849,7 +3213,53 @@ def run_arcsix_merge_for_periods(
         day_n_pops_fit   = []
         day_rho_fit      = []
         day_best_cost    = []
+        day_period_idx   = []
+        day_chunk_number = []
+        day_reference_source_flag = []
         prev_params      = temporal_prior.copy() if temporal_prior is not None else None
+        completed_period_idx = set()
+
+        checkpoint = _load_day_netcdf_checkpoint(
+            day_dir / f"{a_date}_sizedist_merged.nc",
+            include_pops=include_pops,
+        ) if resume else None
+        if checkpoint is not None:
+            checkpoint_edges = np.asarray(checkpoint["common_edges"], float)
+            if output_edges_arr is not None and not np.allclose(checkpoint_edges, output_edges_arr):
+                raise RuntimeError(
+                    f"Existing checkpoint grid does not match requested output_edges for {a_date}."
+                )
+            common_edges = checkpoint_edges
+            _extend_list_from_array(day_fims_algn, checkpoint["fims"])
+            _extend_list_from_array(day_uhsas_algn, checkpoint["uhsas"])
+            if include_pops:
+                _extend_list_from_array(day_pops_algn, checkpoint["pops"])
+            _extend_list_from_array(day_aps_algn, checkpoint["aps"])
+            _extend_list_from_array(day_merged, checkpoint["merged"])
+            day_times_start.extend(checkpoint["times_start"])
+            day_times_end.extend(checkpoint["times_end"])
+            day_incloud.extend(np.asarray(checkpoint["incloud"], int).tolist())
+            day_n_fit.extend(np.asarray(checkpoint["n_fit"], float).tolist())
+            if include_pops:
+                day_n_pops_fit.extend(np.asarray(checkpoint["n_pops_fit"], float).tolist())
+            day_rho_fit.extend(np.asarray(checkpoint["rho_fit"], float).tolist())
+            day_best_cost.extend(np.asarray(checkpoint["best_cost"], float).tolist())
+            day_period_idx.extend(np.asarray(checkpoint["period_idx"], int).tolist())
+            day_chunk_number.extend(np.asarray(checkpoint["chunk_number"], int).tolist())
+            day_reference_source_flag.extend(np.asarray(checkpoint["reference_source_flag"], int).tolist())
+            completed_period_idx = set(day_period_idx)
+            orig_APS_edges = checkpoint["orig_APS_edges"]
+            orig_UHSAS_edges = checkpoint["orig_UHSAS_edges"]
+            orig_POPS_edges = checkpoint["orig_POPS_edges"]
+            orig_FIMS_edges = checkpoint["orig_FIMS_edges"]
+            if temporal_enabled and day_rho_fit:
+                last_pops = day_n_pops_fit[-1] if include_pops and day_n_pops_fit else np.nan
+                prev_params = np.asarray([day_n_fit[-1], last_pops, day_rho_fit[-1]], dtype=float)
+            with log_file.open("a") as f:
+                f.write(
+                    f"[RESUME] loaded {len(day_merged)} completed chunk(s) "
+                    f"from {day_dir / f'{a_date}_sizedist_merged.nc'}\n"
+                )
 
         # --------- load frames & drop timezone metadata without clock conversion ---------
         filtered_frames = read_arcsix_merge_instruments_for_day(
@@ -2882,6 +3292,10 @@ def run_arcsix_merge_for_periods(
         for i, period in enumerate(periods_for_date):
             t_start = period["start"]
             t_end   = period["end"]
+            if resume and period["idx"] in completed_period_idx:
+                with log_file.open("a") as f:
+                    f.write(f"\t[RESUME] skip completed period_idx={period['idx']:03d}\n")
+                continue
 
             try:
                 with log_file.open("a") as f:
@@ -2909,19 +3323,19 @@ def run_arcsix_merge_for_periods(
                 inc_flag = chunk_is_incloud(inlet_flag, t_start, t_end, tol_s=incloud_pad_s)
 
                 # 1) time series plot
-                fig1, _ = plot_period_totals(
-                    a_chunk,
-                    title=f"{a_date} sizedist {i:03d}",
-                    inlet_flag=inlet_flag,
-                    gauss_win=10,
-                    gauss_std=2,
-                    cpc_total=cpc_total_chunk,
-                    t_start=t_start,            # <--- NEW
-                    t_end=t_end,                # <--- NEW
-                )
-
-                fig1.savefig(totals_dir / f"sizedist_{i:03d}_totals.png", dpi=150)
-                plt.close(fig1)
+                if save_time_series_plots:
+                    fig1, _ = plot_period_totals(
+                        a_chunk,
+                        title=f"{a_date} sizedist {i:03d}",
+                        inlet_flag=inlet_flag,
+                        gauss_win=10,
+                        gauss_std=2,
+                        cpc_total=cpc_total_chunk,
+                        t_start=t_start,
+                        t_end=t_end,
+                    )
+                    fig1.savefig(totals_dir / f"sizedist_{i:03d}_totals.png", dpi=150)
+                    plt.close(fig1)
                 
                 ##################################################################
                 # 1.5) build a version of a_chunk with inlet-flagged data removed
@@ -3065,6 +3479,10 @@ def run_arcsix_merge_for_periods(
                     temporal_w_rho=temporal_w_rho,
                     prev_params=prev_params,
                     smooth_rho=smooth_rho,
+                    optimizer_maxiter=optimizer_maxiter,
+                    optimizer_tol=optimizer_tol,
+                    optimizer_popsize=optimizer_popsize,
+                    optimizer_polish=optimizer_polish,
                 )
                 if temporal_enabled:
                     prev_params = np.asarray(
@@ -3073,10 +3491,11 @@ def run_arcsix_merge_for_periods(
                     )
 
                 # 4) loss curve
-                fig_h, ax_h = plot_history(opt_res["hist"])
-                ax_h.set_title(f"opt hist {a_date} {i:03d}")
-                fig_h.savefig(opt_dir / f"sizedist_{i:03d}_opt_hist.png", dpi=150)
-                plt.close(fig_h)
+                if save_loss_plots:
+                    fig_h, ax_h = plot_history(opt_res["hist"])
+                    ax_h.set_title(f"opt hist {a_date} {i:03d}")
+                    fig_h.savefig(opt_dir / f"sizedist_{i:03d}_opt_hist.png", dpi=150)
+                    plt.close(fig_h)
 
                 # 5) log
                 with log_file.open("a") as f:
@@ -3137,20 +3556,21 @@ def run_arcsix_merge_for_periods(
                 fill_kwargs_opt.update(tik_fills)
 
                 # 7) plots
-                (figN, axN), (figV, axV), (specs_V, merged_spec_V) = plot_sizedist_all(
-                    specs=specs_opt,
-                    merged_spec=tik_specs,
-                    line_kwargs=line_kwargs_opt,
-                    merged_line_kwargs=tik_lines,
-                    fill_kwargs=fill_kwargs_opt,
-                    merged_fill_kwargs=tik_fills,
-                    inlet_flag=inlet_chunk,
-                    d_str=a_date,
-                )
-                figN.savefig(plots_dir / f"{a_date}_chunk{i:03d}_dNdlogDp.png", dpi=200)
-                plt.close(figN)
-                figV.savefig(plots_dir / f"{a_date}_chunk{i:03d}_dVdlogDp.png", dpi=200)
-                plt.close(figV)
+                if save_merge_plots:
+                    (figN, axN), (figV, axV), (specs_V, merged_spec_V) = plot_sizedist_all(
+                        specs=specs_opt,
+                        merged_spec=tik_specs,
+                        line_kwargs=line_kwargs_opt,
+                        merged_line_kwargs=tik_lines,
+                        fill_kwargs=fill_kwargs_opt,
+                        merged_fill_kwargs=tik_fills,
+                        inlet_flag=inlet_chunk,
+                        d_str=a_date,
+                    )
+                    figN.savefig(plots_dir / f"{a_date}_chunk{i:03d}_dNdlogDp.png", dpi=200)
+                    plt.close(figN)
+                    figV.savefig(plots_dir / f"{a_date}_chunk{i:03d}_dVdlogDp.png", dpi=200)
+                    plt.close(figV)
 
                 # 8) collect + rebin
                 tik_name  = next(iter(tik_specs.keys()))
@@ -3191,6 +3611,35 @@ def run_arcsix_merge_for_periods(
                     day_n_pops_fit.append(opt_res["n_pops_fit"])
                 day_rho_fit.append(opt_res["rho_fit"])
                 day_best_cost.append(opt_res["best_cost"])
+                day_period_idx.append(period["idx"])
+                day_chunk_number.append(i)
+                day_reference_source_flag.append(0)
+
+                if checkpoint_netcdf:
+                    append_day_netcdf_checkpoint(
+                        day_dir,
+                        a_date,
+                        fine_edges=np.asarray(common_edges, float),
+                        fims_aligned=fims_on_common,
+                        uhsas_aligned=uhsas_on_common,
+                        pops_aligned=pops_on_common if include_pops else None,
+                        aps_aligned=aps_on_common,
+                        merged=merged_on_common,
+                        t_start=t_start,
+                        t_end=t_end,
+                        incloud_flag=inc_flag,
+                        n_fit=opt_res["n_fit"],
+                        n_pops_fit=opt_res["n_pops_fit"] if include_pops else None,
+                        rho_fit=opt_res["rho_fit"],
+                        best_cost=opt_res["best_cost"],
+                        period_idx=period["idx"],
+                        chunk_number=i,
+                        reference_source_flag=0,
+                        orig_APS_edges=np.asarray(orig_APS_edges, float) if orig_APS_edges is not None else None,
+                        orig_UHSAS_edges=np.asarray(orig_UHSAS_edges, float) if orig_UHSAS_edges is not None else None,
+                        orig_POPS_edges=np.asarray(orig_POPS_edges, float) if include_pops and orig_POPS_edges is not None else None,
+                        orig_FIMS_edges=np.asarray(orig_FIMS_edges, float) if orig_FIMS_edges is not None else None,
+                    )
 
             except Exception as e:
                 failed_chunks.append((a_date, i, period["idx"], type(e).__name__, str(e)))
@@ -3220,6 +3669,9 @@ def run_arcsix_merge_for_periods(
                 day_n_fit=np.asarray(day_n_fit, float),
                 day_rho_fit=np.asarray(day_rho_fit, float),
                 day_best_cost=np.asarray(day_best_cost, float),
+                day_period_idx=np.asarray(day_period_idx, int),
+                day_chunk_number=np.asarray(day_chunk_number, int),
+                day_reference_source_flag=np.asarray(day_reference_source_flag, int),
                 day_pops_algn=np.asarray(day_pops_algn, float) if include_pops else None,
                 day_n_pops_fit=np.asarray(day_n_pops_fit, float) if include_pops else None,
                 orig_APS_edges=np.asarray(orig_APS_edges, float) if orig_APS_edges is not None else None,

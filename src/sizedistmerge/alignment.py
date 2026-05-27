@@ -525,6 +525,8 @@ def optimize_multi_custom(
     temporal_weights: np.ndarray | None = None,
     maxiter: int = 200,
     tol: float = 1e-6,
+    popsize: int = 15,
+    polish: bool = True,
     seed: int = 123,
 ):
     """
@@ -574,7 +576,7 @@ def optimize_multi_custom(
         successful chunk. Arrays must match the flattened optimizer parameter
         vector. The temporal term added to the objective is
         sum(weights * (x - target)^2).
-    maxiter, tol, seed : optimizer controls
+    maxiter, tol, popsize, polish, seed : optimizer controls
         Passed directly to SciPy differential_evolution.
 
     Returns
@@ -610,6 +612,9 @@ def optimize_multi_custom(
     flat_bounds: List[Tuple[float, float]] = [b for inst in bounds_list for b in inst]
     if not flat_bounds:
         raise ValueError("bounds_list must contain at least one parameter bound")
+    popsize = int(popsize)
+    if popsize < 1:
+        raise ValueError("popsize must be >= 1")
     param_slices = _build_param_slices(bounds_list)
 
     if (temporal_target is None) != (temporal_weights is None):
@@ -664,8 +669,9 @@ def optimize_multi_custom(
         strategy="best1bin",
         maxiter=maxiter,
         tol=tol,
+        popsize=popsize,
         recombination=0.7,
-        polish=True,
+        polish=bool(polish),
         seed=seed,
         callback=_cb,
     )

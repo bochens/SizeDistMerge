@@ -5,9 +5,16 @@ legacy_src_storage/
 legacy_notebooks/
 .tmp.driveupload/
 .pytest_cache/
+.cache/
+.matplotlib_config/
 build/
 dist/
 *.egg-info/
 
 .DS_Store
 /notebook/
+
+# Local experiment notebooks/scripts.
+notebooks/arcsix_0605_fims_or_putls_merge.ipynb
+notebooks/temporal_regularization_runner.py
+notebooks/temporal_regularization_test.ipynb

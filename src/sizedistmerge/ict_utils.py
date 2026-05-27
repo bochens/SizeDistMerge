@@ -786,6 +786,18 @@ def _detect_bin_columns_any(df: pd.DataFrame):
         renamed.sort(key=lambda t: t[1])
         return "renamed", [c for c, _ in renamed], [mid for _, mid in renamed]
 
+    # Generic merged products can use plain BinNN columns.
+    plain_bincols: List[Tuple[int, str]] = []
+    plain_pat = re.compile(r'^[Bb]in_?(\d+)$', re.IGNORECASE)
+    for col in cols:
+        match_obj = plain_pat.match(col)
+        if match_obj:
+            idx = int(match_obj.group(1))
+            plain_bincols.append((idx, col))
+    if plain_bincols:
+        plain_bincols.sort(key=lambda t: t[0])
+        return "bin", [c for _, c in plain_bincols], None
+
     # APS/POPS/UHSAS style: *_BinNN
     bincols: List[Tuple[int, str]] = []
     pat = re.compile(r'^(?P<prefix>[A-Za-z0-9]+)[_\-]?[Bb]in_?(\d+)$', re.IGNORECASE)

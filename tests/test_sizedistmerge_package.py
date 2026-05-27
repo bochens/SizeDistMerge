@@ -80,6 +80,41 @@ def test_count_conserving_rebin_preserves_total_counts():
     assert np.isclose(new_counts, old_counts)
 
 
+def test_lut_remap_accepts_precomputed_source_response():
+    sys.path.insert(0, str(SRC))
+    from sizedistmerge import optical_diameter as od
+
+    class FakeLUT:
+        Dg = np.logspace(1, 3, 80)
+
+        def sigma_curve(self, D_vec_nm, n: float, k: float) -> np.ndarray:
+            D = np.asarray(D_vec_nm, float)
+            return D**2 * (0.8 + 0.2 * float(n) + 0.1 * float(k))
+
+    lut = FakeLUT()
+    edges = np.array([20.0, 40.0, 80.0, 160.0, 320.0])
+    ri_src = complex(1.5, 0.0)
+    ri_dst = complex(1.7, 0.0)
+    source_sigma_fn, _ = od.make_monotone_sigma_interpolator(
+        lut.Dg,
+        lut.sigma_curve(lut.Dg, ri_src.real, ri_src.imag),
+        response_bins=20,
+        increasing=True,
+    )
+
+    direct = od.convert_do_lut(edges, ri_src, ri_dst, lut, response_bins=20)
+    cached = od.convert_do_lut(
+        edges,
+        ri_src,
+        ri_dst,
+        lut,
+        response_bins=20,
+        source_sigma_fn=source_sigma_fn,
+    )
+
+    assert np.allclose(cached, direct)
+
+
 def test_validation_errors_are_clear_for_bad_grids():
     sys.path.insert(0, str(SRC))
     import sizedistmerge as sdm
@@ -510,6 +545,7 @@ def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
 
     monkeypatch.setattr(mp, "_load_uhsas_lut", lambda _lut_dir: object())
     monkeypatch.setattr(mp, "_load_pops_lut", lambda _lut_dir: object())
+    monkeypatch.setattr(mp, "_make_source_sigma_fn", lambda *_args, **_kwargs: None)
 
     def fake_remap(edges_in, theta, **_kwargs):
         return np.asarray(edges_in, float) * (1.0 + float(theta[0]) * 1e-6)
@@ -524,6 +560,10 @@ def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
         captured["w_refs"] = [inst["w_ref"] for inst in kwargs["instruments"]]
         captured["temporal_target"] = kwargs["temporal_target"]
         captured["temporal_weights"] = kwargs["temporal_weights"]
+        captured["maxiter"] = kwargs["maxiter"]
+        captured["tol"] = kwargs["tol"]
+        captured["popsize"] = kwargs["popsize"]
+        captured["polish"] = kwargs["polish"]
         captured["ri_srcs"] = [
             inst["kwargs"].get("ri_src")
             for inst in kwargs["instruments"]
@@ -550,6 +590,10 @@ def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
         temporal_w_uh=10.0,
         temporal_w_po=11.0,
         temporal_w_rho=1e-7,
+        optimizer_maxiter=123,
+        optimizer_tol=1e-5,
+        optimizer_popsize=7,
+        optimizer_polish=False,
     )
 
     assert captured["instrument_count"] == 3
@@ -557,6 +601,10 @@ def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
     assert captured["w_refs"] == [2.0, 3.0, 4.0]
     assert captured["temporal_target"].tolist() == [1.40, 1.60, 1000.0]
     assert captured["temporal_weights"].tolist() == [10.0, 11.0, 1e-7]
+    assert captured["maxiter"] == 123
+    assert captured["tol"] == 1e-5
+    assert captured["popsize"] == 7
+    assert captured["polish"] is False
     assert captured["ri_srcs"] == [mp.RI_UHSAS_SRC, mp.RI_UHSAS_SRC]
     assert opt_res["n_fit"] == 1.45
     assert opt_res["n_pops_fit"] == 1.55
@@ -584,6 +632,7 @@ def test_run_joint_optimization_handles_fims_uhsas_aps_without_pops(monkeypatch)
     captured = {}
 
     monkeypatch.setattr(mp, "_load_uhsas_lut", lambda _lut_dir: object())
+    monkeypatch.setattr(mp, "_make_source_sigma_fn", lambda *_args, **_kwargs: None)
 
     def fail_pops_lut(_lut_dir):
         raise AssertionError("POPS LUT should not load in FIMS+UHSAS+APS mode")
@@ -654,6 +703,7 @@ def test_run_joint_optimization_can_override_pops_ri_source(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(mp, "_load_pops_lut", lambda _lut_dir: object())
+    monkeypatch.setattr(mp, "_make_source_sigma_fn", lambda *_args, **_kwargs: None)
 
     def fake_remap(edges_in, theta, **kwargs):
         captured.setdefault("ri_srcs", []).append(kwargs["ri_src"])
@@ -838,6 +888,7 @@ def test_arcsix_period_runner_carries_temporal_params(monkeypatch, tmp_path):
         temporal_w_rho=1e-7,
         aps_combine_weight=2.0,
         output_edges=edges,
+        checkpoint_netcdf=False,
     )
 
     assert len(captured_prev) == 2
@@ -867,6 +918,7 @@ def test_temporal_regularization_requires_explicit_prior(monkeypatch):
     }
 
     monkeypatch.setattr(mp, "_load_uhsas_lut", lambda _lut_dir: object())
+    monkeypatch.setattr(mp, "_make_source_sigma_fn", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(mp, "_uhsas_remap_fn", lambda edges_in, _theta, **_kwargs: np.asarray(edges_in, float))
     monkeypatch.setattr(mp, "_aps_remap_fn", lambda edges_in, _theta, **_kwargs: np.asarray(edges_in, float))
 
@@ -1080,6 +1132,9 @@ def test_write_day_netcdf_uses_canonical_name_and_pops_variables(tmp_path):
         assert "pops_aligned_dNdlogDp" in nc.variables
         assert "retrieved_pops_n_fit" in nc.variables
         assert "pops_edges_nm" in nc.variables
+        assert "period_idx" in nc.variables
+        assert nc.dimensions["chunk"].isunlimited()
+        assert nc.variables["period_idx"][:].tolist() == [-1]
         assert nc.variables["retrieved_pops_n_fit"][:].tolist() == [1.55]
         assert "FIMS-UHSAS-POPS-APS" in nc.description
 
@@ -1116,6 +1171,82 @@ def test_write_day_netcdf_omits_pops_variables_when_pops_is_absent(tmp_path):
         assert "retrieved_pops_n_fit" not in nc.variables
         assert "pops_edges_nm" not in nc.variables
         assert "FIMS-UHSAS-APS" in nc.description
+
+
+def test_append_day_netcdf_checkpoint_is_resumable(tmp_path):
+    sys.path.insert(0, str(SRC))
+    from netCDF4 import Dataset
+    mp = load_arcsix_production_module()
+
+    edges = np.array([10.0, 20.0, 40.0])
+    vals = np.array([1.0, 2.0])
+
+    nc_path = mp.append_day_netcdf_checkpoint(
+        tmp_path,
+        "2024-05-28",
+        fine_edges=edges,
+        fims_aligned=vals,
+        uhsas_aligned=vals + 1.0,
+        pops_aligned=vals + 2.0,
+        aps_aligned=vals + 3.0,
+        merged=vals + 4.0,
+        t_start=np.datetime64("2024-05-28T00:00:00"),
+        t_end=np.datetime64("2024-05-28T00:01:00"),
+        incloud_flag=0,
+        n_fit=1.45,
+        n_pops_fit=1.55,
+        rho_fit=1200.0,
+        best_cost=0.25,
+        period_idx=7,
+        chunk_number=3,
+        orig_APS_edges=edges,
+        orig_UHSAS_edges=edges,
+        orig_POPS_edges=edges,
+        orig_FIMS_edges=edges,
+    )
+
+    with Dataset(nc_path) as nc:
+        assert nc.dimensions["chunk"].isunlimited()
+        assert nc.variables["period_idx"][:].tolist() == [7]
+        assert nc.variables["chunk_number"][:].tolist() == [3]
+        assert nc.variables["merged_dNdlogDp"][:].tolist() == [[5.0, 6.0]]
+
+    checkpoint = mp._load_day_netcdf_checkpoint(nc_path, include_pops=True)
+    assert checkpoint["period_idx"].tolist() == [7]
+    assert checkpoint["chunk_number"].tolist() == [3]
+    assert checkpoint["n_fit"].tolist() == [1.45]
+    assert checkpoint["n_pops_fit"].tolist() == [1.55]
+    assert checkpoint["rho_fit"].tolist() == [1200.0]
+
+
+def test_empty_day_netcdf_checkpoint_is_ignored(tmp_path):
+    sys.path.insert(0, str(SRC))
+    mp = load_arcsix_production_module()
+
+    edges = np.array([10.0, 20.0, 40.0])
+    mp.write_day_netcdf(
+        tmp_path,
+        "2024-05-28",
+        day_fine_edges=edges,
+        day_fims_algn=np.empty((0, 2), dtype=float),
+        day_uhsas_algn=np.empty((0, 2), dtype=float),
+        day_aps_algn=np.empty((0, 2), dtype=float),
+        day_fine_vals=np.empty((0, 2), dtype=float),
+        day_times_start=[],
+        day_times_end=[],
+        day_incloud_flag=[],
+        day_n_fit=[],
+        day_rho_fit=[],
+        day_best_cost=[],
+        day_period_idx=[],
+        day_chunk_number=[],
+        atomic=False,
+    )
+
+    assert mp._load_day_netcdf_checkpoint(
+        tmp_path / "2024-05-28_sizedist_merged.nc",
+        include_pops=False,
+    ) is None
 
 
 def test_post_merge_qc_and_icartt_conversion_use_packaged_workflow(monkeypatch, tmp_path):

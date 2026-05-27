@@ -586,7 +586,7 @@ def make_monotone_sigma_interpolator(
 def convert_do_lut(
     Do_nm,
     ri_src, ri_dst, lut: "SigmaLUT",
-    *, response_bins=50, eps=1e-12
+    *, response_bins=50, eps=1e-12, source_sigma_fn=None
 ):
     """
     Map a diameter axis (typically OPC bin edges) from ri_src -> ri_dst using the LUT.
@@ -607,6 +607,9 @@ def convert_do_lut(
         Binning used inside monotone sigma(D) construction (isotonic regression).
     eps : float
         Small positive threshold for sanity checks (used only for validation).
+    source_sigma_fn : callable, optional
+        Precomputed source-response function. This avoids rebuilding the fixed
+        source RI curve inside repeated optimization calls.
 
     Returns
     -------
@@ -624,12 +627,16 @@ def convert_do_lut(
     ns, ks = float(np.real(ri_src)), float(np.imag(ri_src))
     nd, kd = float(np.real(ri_dst)), float(np.imag(ri_dst))
 
-    sigma_src = lut.sigma_curve(Dg, ns, ks)
     sigma_dst = lut.sigma_curve(Dg, nd, kd)
 
-    f_src_sigma, _    = make_monotone_sigma_interpolator(
-        Dg, sigma_src, response_bins=response_bins, increasing=True
-    )
+    if source_sigma_fn is None:
+        sigma_src = lut.sigma_curve(Dg, ns, ks)
+        f_src_sigma, _ = make_monotone_sigma_interpolator(
+            Dg, sigma_src, response_bins=response_bins, increasing=True
+        )
+    else:
+        f_src_sigma = source_sigma_fn
+
     _, D_of_sigma_dst = make_monotone_sigma_interpolator(
         Dg, sigma_dst, response_bins=response_bins, increasing=True
     )

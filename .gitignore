@@ -16,5 +16,6 @@ dist/
 
 # Local experiment notebooks/scripts.
 notebooks/arcsix_0605_fims_or_putls_merge.ipynb
+notebooks/arcsix_merge_1min_5min_package.ipynb
 notebooks/temporal_regularization_runner.py
 notebooks/temporal_regularization_test.ipynb

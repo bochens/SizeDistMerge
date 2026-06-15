@@ -271,6 +271,42 @@ def test_load_arcsix_merge_frames_for_day_applies_dirs_timezone_and_fims_lag(mon
     ]
 
 
+def test_arcsix_loader_does_not_gate_native_frames_on_fims_when_fims_optional(monkeypatch, tmp_path):
+    sys.path.insert(0, str(SRC))
+    import pandas as pd
+    mp = load_arcsix_production_module()
+
+    idx = pd.date_range("2024-06-05 16:00:00", periods=3, freq="1min")
+    native = pd.DataFrame({"dNdlogDp_d100nm": [1.0, 2.0, 3.0]}, index=idx)
+    fims = pd.DataFrame(
+        {
+            "dNdlogDp_d20nm": [10.0, np.nan, 30.0],
+            "QC_Flag": [1, 1, 1],
+        },
+        index=idx,
+    )
+
+    monkeypatch.setattr(mp, "read_aps", lambda *_args, **_kwargs: native.copy())
+    monkeypatch.setattr(mp, "read_uhsas", lambda *_args, **_kwargs: native.copy())
+    monkeypatch.setattr(mp, "read_pops", lambda *_args, **_kwargs: native.copy())
+    monkeypatch.setattr(mp, "read_fims", lambda *_args, **_kwargs: fims.copy())
+    monkeypatch.setattr(mp, "check_common_grid", lambda *_args, **_kwargs: True)
+
+    frames = mp.read_arcsix_merge_instruments_for_day(
+        "2024-06-05",
+        tmp_path / "LARGE-APS",
+        tmp_path / "FIMS",
+        uhsas_dir=tmp_path / "PUTLS-UHSAS",
+        pops_dir=tmp_path / "PUTLS-POPS",
+        require_fims=False,
+    )
+
+    assert frames["UHSAS"].index.tolist() == idx.tolist()
+    assert frames["POPS"].index.tolist() == idx.tolist()
+    assert frames["APS"].index.tolist() == idx.tolist()
+    assert frames["FIMS"].index.tolist() == [idx[0], idx[2]]
+
+
 def test_ict_time_helpers_strip_timezone_without_clock_shift():
     sys.path.insert(0, str(SRC))
     import pandas as pd
@@ -1284,6 +1320,7 @@ def test_post_merge_qc_and_icartt_conversion_use_packaged_workflow(monkeypatch, 
         day_n_pops_fit=[1.55, 1.56, 1.57],
         day_rho_fit=[1000.0, 1010.0, 1020.0],
         day_best_cost=[0.1, 0.3, 0.4],
+        day_reference_source_flag=[0, 1, 0],
         orig_APS_edges=edges,
         orig_UHSAS_edges=edges,
         orig_POPS_edges=edges,
@@ -1318,7 +1355,9 @@ def test_post_merge_qc_and_icartt_conversion_use_packaged_workflow(monkeypatch, 
         assert len(nc.dimensions["chunk"]) == 2
         assert "warning_high_cost" in nc.variables
         assert "warning_merged_gt10_diff_from_cpc" in nc.variables
+        assert "reference_source_flag" in nc.variables
         assert nc.variables["warning_high_cost"][:].tolist() == [0, 1]
+        assert nc.variables["reference_source_flag"][:].tolist() == [0, 1]
 
     ict_paths = mp.convert_qc_netcdf_to_icartt(
         qc.qc_netcdf_dir,
@@ -1335,6 +1374,40 @@ def test_post_merge_qc_and_icartt_conversion_use_packaged_workflow(monkeypatch, 
     assert "1001" in lines[0]
     assert any("Time_Start" in line for line in lines[:nheader])
     assert any("warning_merged_gt10_diff_from_cpc" in line for line in lines[:nheader])
+    assert any("reference_source_flag" in line for line in lines[:nheader])
     assert not any("quadlog" in line.lower() for line in lines[:nheader])
     assert any("linear residual outlier" in line for line in lines[:nheader])
     assert len(lines[nheader:]) == 2
+    header_vars = [part.strip() for part in lines[nheader - 1].split(",")]
+    ref_idx = header_vars.index("reference_source_flag")
+    first_data = [part.strip() for part in lines[nheader].split(",")]
+    second_data = [part.strip() for part in lines[nheader + 1].split(",")]
+    assert first_data[ref_idx] == "0"
+    assert second_data[ref_idx] == "1"
+
+
+def test_find_merged_netcdf_files_excludes_product_and_failed_backup_dirs(tmp_path):
+    sys.path.insert(0, str(SRC))
+    mp = load_arcsix_production_module()
+
+    keep = tmp_path / "merge" / "20240809" / "2024-08-09" / "2024-08-09_sizedist_merged.nc"
+    failed = (
+        tmp_path
+        / "merge"
+        / "20240809_partial_failed_hdf_20260529"
+        / "2024-08-09"
+        / "2024-08-09_sizedist_merged.nc"
+    )
+    qc = tmp_path / "merge" / "qc_flagged_nc" / "2024-08-09_sizedist_merged.nc"
+    generated = (
+        tmp_path
+        / "merge"
+        / "_generated_notebooks"
+        / "2024-08-09_sizedist_merged.nc"
+    )
+    for path in (keep, failed, qc, generated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("placeholder")
+
+    found = mp.find_merged_netcdf_files(tmp_path / "merge")
+    assert found == [keep]

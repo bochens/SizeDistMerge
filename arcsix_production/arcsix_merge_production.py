@@ -107,14 +107,21 @@ def find_merged_netcdf_files(base_dir: str | Path) -> list[Path]:
     """Return raw per-day merge NetCDFs under ``base_dir``.
 
     Product folders created by this module are intentionally excluded so a
-    rerun does not recursively QC its own output.
+    rerun does not recursively QC its own output. Failed or partial backup
+    folders are also excluded; those files are useful for debugging but should
+    not enter product-stage QC.
     """
 
     base = Path(base_dir)
     excluded = {"qc_flagged_nc", "icartt_from_qc_flagged_nc", "qc_plots"}
     files = []
     for path in sorted(base.glob("**/*_sizedist_merged.nc")):
-        if excluded.intersection(path.parts):
+        relative_parts = path.relative_to(base).parts
+        if excluded.intersection(relative_parts):
+            continue
+        if any(part.startswith("_") for part in relative_parts):
+            continue
+        if any("partial_failed" in part for part in relative_parts):
             continue
         files.append(path)
     return files
@@ -1010,6 +1017,8 @@ def write_icartt_from_netcdf(
         }
         if "retrieved_pops_n_fit" in ds.variables:
             one_d_vars["retrieved_pops_n_fit"] = _read_1d(ds, "retrieved_pops_n_fit")
+        if "reference_source_flag" in ds.variables:
+            one_d_vars["reference_source_flag"] = _read_1d(ds, "reference_source_flag")
 
         for name, values in one_d_vars.items():
             if values.size != t0_s.size:
@@ -1036,6 +1045,8 @@ def write_icartt_from_netcdf(
         if "retrieved_pops_n_fit" in one_d_vars:
             dep_names.append("retrieved_pops_n_fit")
         dep_names.append("retrieved_aps_density")
+        if "reference_source_flag" in one_d_vars:
+            dep_names.append("reference_source_flag")
         dep_names.extend(bin_labels)
 
         dep_def_lines = [
@@ -1070,6 +1081,11 @@ def write_icartt_from_netcdf(
             "retrieved_aps_density, kg m-3, Aerosol_ParticleDensity_Insitu_Merged_APSDensityFit, "
             "Effective particle density for APS used in merge optimization (EXPERIMENTAL/DIAGNOSTIC)"
         )
+        if "reference_source_flag" in one_d_vars:
+            dep_def_lines.append(
+                "reference_source_flag, none, DataQuality_ReferenceSource_Merged_SizeDistribution, "
+                "Reference spectrum source for merge alignment: 0=FIMS, 1=PUTLS-MERGE"
+            )
         for idx, label in enumerate(bin_labels):
             dep_def_lines.append(
                 f"{label}, #/cm3, {bin_stdnames[idx]}, "
@@ -1151,6 +1167,9 @@ def write_icartt_from_netcdf(
             col += 1
         output[:, col] = one_d_vars["retrieved_aps_density"]
         col += 1
+        if "reference_source_flag" in one_d_vars:
+            output[:, col] = one_d_vars["reference_source_flag"]
+            col += 1
         output[:, col:] = merged
         if col + merged.shape[1] != output.shape[1]:
             raise RuntimeError("Internal ICARTT column packing mismatch")
@@ -1425,20 +1444,45 @@ def read_arcsix_merge_instruments_for_day(a_date, aps_dir, fims_dir, *, uhsas_di
     if "FIMS" in frames:
         _ = check_common_grid(frames, ref_key="FIMS", round_to=None)
 
-    extra = None
+    fims_extra = None
     if "FIMS" in frames:
         fims_qc = pd.to_numeric(
             frames["FIMS"].get("QC_Flag", pd.Series(index=frames["FIMS"].index)),
             errors="coerce",
         )
-        extra = {"FIMS": fims_qc.ne(2)}
-    filtered, _keep = filter_by_spectra_presence(
-        frames,
-        col_prefix="dNdlogDp",
-        min_instruments=None,
-        extra_masks=extra,
-        treat_nonpositive_as_nan=False,
-    )
+        fims_extra = {"FIMS": fims_qc.ne(2)}
+
+    if require_fims:
+        filtered, _keep = filter_by_spectra_presence(
+            frames,
+            col_prefix="dNdlogDp",
+            min_instruments=None,
+            extra_masks=fims_extra,
+            treat_nonpositive_as_nan=False,
+        )
+        return filtered
+
+    filtered = {}
+    native_frames = {k: v for k, v in frames.items() if k != "FIMS"}
+    if native_frames:
+        native_filtered, _keep = filter_by_spectra_presence(
+            native_frames,
+            col_prefix="dNdlogDp",
+            min_instruments=None,
+            treat_nonpositive_as_nan=False,
+        )
+        filtered.update(native_filtered)
+
+    if "FIMS" in frames:
+        fims_filtered, _keep = filter_by_spectra_presence(
+            {"FIMS": frames["FIMS"]},
+            col_prefix="dNdlogDp",
+            min_instruments=None,
+            extra_masks=fims_extra,
+            treat_nonpositive_as_nan=False,
+        )
+        if "FIMS" in fims_filtered and not fims_filtered["FIMS"].empty:
+            filtered["FIMS"] = fims_filtered["FIMS"]
 
     return filtered
 

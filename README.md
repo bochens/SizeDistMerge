@@ -61,8 +61,11 @@ counts = sdm.counts_from_dndlog(dndlog, edges_nm=edges_nm)
 dndlog_again = sdm.dndlog_from_counts(counts, edges_nm=edges_nm)
 
 dv_nm = sdm.da_to_dv(1000.0, rho_p=1000.0)
-uhsas_lut = sdm.SigmaLUT(str(sdm.lut_path("uhsas")))
 ```
+
+Optical conversion requires a LUT rebuilt with the corrected optical model.
+The historical packaged tables are preserved but rejected by default; see
+[Optical model and LUT migration](docs/optical_model.md) before using them.
 
 Most reusable functions are available directly as `sdm.function(...)`. The
 submodules can also be imported when that is clearer:
@@ -112,8 +115,11 @@ Implementation: `src/sizedistmerge/optical_diameter.py`
 - `build_pops_sigma_lut()` and `build_uhsas_sigma_lut()` - Rebuild POPS or
   UHSAS response LUTs when the optical-response grid needs to be regenerated.
 
-Packaged LUTs are available through `sdm.lut_path("pops")` and
-`sdm.lut_path("uhsas")`.
+Historical packaged LUTs are located through `sdm.lut_path("pops")` and
+`sdm.lut_path("uhsas")`. These paths do not certify that a table uses the
+current optical model. `SigmaLUT` checks its model version and completion marker.
+See [Optical model and LUT migration](docs/optical_model.md) for rebuilding and
+explicitly loading old tables for comparisons.
 
 ### Alignment And Retrieved Parameters
 
@@ -234,12 +240,13 @@ Current package examples are in `notebooks/`:
 
 ## Packaged LUT Data
 
-The package includes POPS and UHSAS LUTs under `src/sizedistmerge/data/lut/`:
+The package preserves historical POPS and UHSAS LUTs under `src/sizedistmerge/data/lut/`:
 
 - `pops_sigma_col_405nm.zarr`
 - `uhsas_sigma_col_1054nm.zarr`
 
-Use:
+These still use the old optical calculation and must be rebuilt before corrected
+production. The helpers below locate the files; they do not load or validate them:
 
 ```python
 pops_lut_path = sdm.lut_path("pops")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import tempfile
+import warnings
 
 
 def _configure_miepython_jit() -> None:
@@ -33,35 +34,53 @@ DEFAULT_CHUNKS   = (128, 64, 1)           # (D, n, k) for Zarr v3
 
 RI_UHSAS_SRC=complex(1.52, 0.00)
 RI_POPS_SRC =complex(1.615, 0.001)
+
+# Old disk-width LUTs must not silently enter new calculations.
+OPTICAL_MODEL_VERSION = "solid-angle-polarized-cones-v1"
 # -------------------------------
 # Geometries
 # -------------------------------
 
 @dataclass(frozen=True)
-class POPSGeom: 
-# Gao et al., “A Light-Weight, High-Sensitivity Particle Spectrometer for PM2.5 Aerosol Measurements.”
+class POPSGeom:
+    """POPS mirror cone from Gao et al. (2016), Fig. 1: 38--142 degrees.
+
+    Its circular rim defines a 52 degree cone about the collection axis.
+    Mirror curvature is already represented by that measured half-angle;
+    the vertex distance and diameter must not be used as a flat-disk opening.
+    Mirror-only is the default (as in Liu et al., 2021, Appendix A).
+    Optional direct collection requires its own particle-to-aperture distance.
+    """
     ring_theta_min_deg: float = 38.0
-    ring_theta_max_deg: float = 143.0
-    ring_step_deg:      float = 1.0
+    ring_theta_max_deg: float = 142.0
+    ring_step_deg:      float = 0.25
     mirror_diameter_mm: float = 25.0
     distance_to_mirror_mm: float = 14.3
-    pmt_aperture_d_mm:  float = 5.0
+    pmt_aperture_d_mm:  float = 0.0
     pmt_center_deg:     float = 90.0
+    mirror_halfangle_deg: float = 52.0
+    pmt_aperture_distance_mm: float | None = None
 
 
 @dataclass(frozen=True)
 class UHSASGeom:
-# Ultra High Sensitivity Aerosol Spectrometer (UHSAS) Operator Manual DMT
+    """One UHSAS collection arm: 14.8--57 degree annular cone.
+
+    Howell et al. (2021), Fig. 1 and Appendix A. Cross-sections are per arm,
+    per total incident irradiance, without detector gain. The opposite arm
+    is identical for a sphere. Counterpropagating incoherent beams give the
+    same integral because this acceptance is symmetric under theta -> pi-theta.
+    """
     big_theta_min_deg: float = 33.0
     big_theta_max_deg: float = 147.0
     small_theta_min_deg: float = 75.2
     small_theta_max_deg: float = 104.8
-    ring_step_deg:      float = 1.0
+    ring_step_deg:      float = 0.25
 
     # Plane distance from interaction region (manual: 8 mm)
     aperture_distance_mm: float = 8.0
 
-    # Effective disk diameters are set by these half-angles via D = 2 L tan(angle)
+    # These half-angles define acceptance; distance alone adds no weighting.
     big_outer_halfangle_deg:   float = 57.0     # ≈ manual ±57°
     inner_stop_halfangle_deg:  float = 14.8     # manual ±14.8°
 
@@ -69,7 +88,7 @@ class UHSASGeom:
 # Fast helpers (Numba optional)
 # -------------------------------
 try:
-    from numba import njit, prange
+    from numba import njit
     _HAVE_NUMBA = True
 except Exception:
     _HAVE_NUMBA = False
@@ -83,92 +102,124 @@ if _HAVE_NUMBA:
             s += 0.5 * (y[i] + y[i+1]) * dx
         return s
 
-    @njit(cache=True, fastmath=True)
-    def _trapz_weighted_numba(y, w, x):
-        s = 0.0
-        for i in range(x.size - 1):
-            dx = x[i+1] - x[i]
-            s += 0.5 * (y[i]*w[i] + y[i+1]*w[i+1]) * dx
-        return s
 else:
     _trapz_numba = None
-    _trapz_weighted_numba = None
 
 # -------------------------------
 # Geometry caches
 # -------------------------------
 
+@dataclass(frozen=True)
+class _SideCollectionCache:
+    theta_rad: np.ndarray
+    mu: np.ndarray
+    dphi: np.ndarray
+    perp_phi: np.ndarray
+    parallel_phi: np.ndarray
+
+
+@dataclass(frozen=True)
 class _POPSCache:
-    __slots__ = ("mu", "dphi", "theta_ring_rad", "i_pmt", "omega_pmt", "ring_idx")
-    def __init__(self, mu, dphi, theta_ring_rad, i_pmt, omega_pmt):
-        self.mu = mu                                # cos(θ) for ring + PMT (last entry)
-        self.dphi = dphi                            # Δφ_disk(θ) for ring points
-        self.theta_ring_rad = theta_ring_rad        # θ grid for ring (radians)
-        self.i_pmt = i_pmt                          # index of PMT (90°) in mu
-        self.omega_pmt = omega_pmt                  # Ω_PMT
-        self.ring_idx = np.arange(theta_ring_rad.size, dtype=int)  # select ring in (ring+PMT)
+    mirror: _SideCollectionCache
+    direct: _SideCollectionCache | None
+
+
+def _cone_azimuth_weights(theta_rad, halfangle_deg):
+    """Azimuth integrals for a circular cone at theta=90, phi=0.
+
+    phi is measured from the central scattering plane; the laser electric
+    field is perpendicular to that plane. The cone condition is
+    sin(theta)*cos(phi) >= cos(alpha). Its half-width is therefore
+    beta = acos(cos(alpha)/sin(theta)), not asin of a sampled disk chord.
+    Integrate cos(phi)^2 and sin(phi)^2 for the two polarization components.
+    The sin(theta) solid-angle factor is applied separately in the kernel.
+    """
+    if not np.isfinite(halfangle_deg) or not 0 <= halfangle_deg < 90:
+        raise ValueError("collection half-angle must be finite and in [0, 90) degrees")
+    theta = np.asarray(theta_rad, dtype=float)
+    beta = np.zeros_like(theta)
+    if halfangle_deg > 0:
+        ca = np.cos(np.deg2rad(halfangle_deg))
+        inside = np.sin(theta) > ca
+        beta[inside] = np.arccos(np.clip(ca / np.sin(theta[inside]), 0.0, 1.0))
+    sine_term = 0.5 * np.sin(2.0 * beta)
+    return 2.0 * beta, beta + sine_term, beta - sine_term
+
+
+def _side_collection_cache(outer_deg, inner_deg, step_deg):
+    if not np.isfinite(step_deg) or step_deg <= 0:
+        raise ValueError("ring_step_deg must be finite and > 0")
+    if not (np.isfinite(outer_deg) and np.isfinite(inner_deg)
+            and 0 <= inner_deg < outer_deg < 90):
+        raise ValueError("require 0 <= inner half-angle < outer half-angle < 90 degrees")
+    # Exact physical boundaries and centre do not change with grid resolution.
+    lo, hi = 90.0 - outer_deg, 90.0 + outer_deg
+    # A narrow direct aperture still needs enough samples at its curved edges.
+    count = max(256, int(np.ceil((hi - lo) / step_deg))) + 1
+    deg = np.unique(np.r_[np.linspace(lo, hi, count),
+                          90.0 - inner_deg, 90.0, 90.0 + inner_deg])
+    th = np.deg2rad(deg)
+    outer = _cone_azimuth_weights(th, outer_deg)
+    inner = _cone_azimuth_weights(th, inner_deg)
+    weights = [np.maximum(a - b, 0.0) for a, b in zip(outer, inner)]
+    return _SideCollectionCache(th, np.cos(th), *weights)
+
+
+def _check_theta_coverage(low, high, halfangle, label):
+    if not (np.isfinite(low) and np.isfinite(high)
+            and 0 <= low <= 90 - halfangle and 90 + halfangle <= high <= 180):
+        raise ValueError(f"{label} theta limits must cover 90 +/- its collection half-angle")
+
 
 def pops_geometry_cache(geom: POPSGeom) -> _POPSCache:
-    ring_deg = np.arange(geom.ring_theta_min_deg, geom.ring_theta_max_deg,
-                         geom.ring_step_deg, dtype=float)
-    theta_eval_deg = np.r_[ring_deg, geom.pmt_center_deg]
-    mu = np.cos(np.deg2rad(theta_eval_deg))
+    _check_theta_coverage(geom.ring_theta_min_deg, geom.ring_theta_max_deg,
+                          geom.mirror_halfangle_deg, "POPS mirror")
+    mirror = _side_collection_cache(geom.mirror_halfangle_deg, 0.0, geom.ring_step_deg)
+    if not np.isfinite(geom.pmt_aperture_d_mm) or geom.pmt_aperture_d_mm < 0:
+        raise ValueError("pmt_aperture_d_mm must be finite and >= 0")
+    direct = None
+    if geom.pmt_aperture_d_mm > 0:
+        distance = geom.pmt_aperture_distance_mm
+        if distance is None or not np.isfinite(distance) or distance <= 0:
+            raise ValueError("Direct POPS collection requires pmt_aperture_distance_mm; "
+                             "do not use the mirror distance. Set pmt_aperture_d_mm=0 "
+                             "for an explicit mirror-only model.")
+        if geom.pmt_center_deg != 90.0:
+            raise ValueError("Direct POPS collection currently supports only pmt_center_deg=90")
+        alpha = np.rad2deg(np.arctan(0.5 * geom.pmt_aperture_d_mm / distance))
+        direct = _side_collection_cache(alpha, 0.0, geom.ring_step_deg)
+    return _POPSCache(mirror, direct)
 
-    R = 0.5 * geom.mirror_diameter_mm
-    L = float(geom.distance_to_mirror_mm)
-    x_span = np.linspace(-R, R, ring_deg.size)
-    chord_norm = 2.0 * np.sqrt(np.maximum(0.0, R**2 - x_span**2)) / L
-    dphi = 2.0 * np.arcsin(np.clip(0.5 * chord_norm, 0.0, 1.0))
 
-    theta_ring_rad = np.deg2rad(ring_deg)
-    i_pmt = ring_deg.size
-    omega_pmt = np.pi * (0.5 * geom.pmt_aperture_d_mm)**2 / (L**2)
-    return _POPSCache(mu, dphi, theta_ring_rad, i_pmt, omega_pmt)
+def uhsas_geometry_cache(geom: UHSASGeom) -> _SideCollectionCache:
+    _check_theta_coverage(geom.big_theta_min_deg, geom.big_theta_max_deg,
+                          geom.big_outer_halfangle_deg, "UHSAS outer")
+    _check_theta_coverage(geom.small_theta_min_deg, geom.small_theta_max_deg,
+                          geom.inner_stop_halfangle_deg, "UHSAS exclusion")
+    return _side_collection_cache(geom.big_outer_halfangle_deg,
+                                  geom.inner_stop_halfangle_deg, geom.ring_step_deg)
 
 
-class _UHSASCache:
-    __slots__ = ("th_big","mu_big","dphi_big","th_small","mu_small","dphi_small")
-    def __init__(self, th_big, mu_big, dphi_big, th_small, mu_small, dphi_small):
-        self.th_big   = th_big
-        self.mu_big   = mu_big
-        self.dphi_big = dphi_big
-        self.th_small   = th_small
-        self.mu_small   = mu_small
-        self.dphi_small = dphi_small
+def _collected_cross_section(D_nm, m_particle, wavelength_nm, cache):
+    """One polarized side-collection path, in um^2.
 
-def _disk_dphi_from_D_at_L(d_mm: float, L_mm: float, n_pts: int) -> np.ndarray:
+    miepython qsca normalization supplies intensity per steradian, including
+    Qsca. P11-P12=|S1|^2 and P11+P12=|S2|^2: no extra factor of one half.
     """
-    POPS-style azimuth width Δφ(θ) made from a circular disk of diameter d at distance L.
-    Same construction as POPS: sample chord along the disk and map 1:1 onto θ-grid points.
-    Note: Δφ from this construction depends only on disk geometry, not explicitly on θ;
-    we keep the same indexing pattern for consistency with POPS.
-    """
-    R = 0.5 * float(d_mm)
-    L = float(L_mm)
-    x = np.linspace(-R, R, int(n_pts))
-    chord_over_L = 2.0 * np.sqrt(np.maximum(0.0, R*R - x*x)) / L
-    return 2.0 * np.arcsin(np.clip(0.5 * chord_over_L, 0.0, 1.0))
+    x = np.pi * D_nm / wavelength_nm
+    PM = mie.phase_matrix(m_particle, x, cache.mu, norm="qsca")
+    perpendicular = PM[0, 0, :] - PM[0, 1, :]
+    parallel = PM[0, 0, :] + PM[0, 1, :]
+    phi_integral = perpendicular * cache.perp_phi + parallel * cache.parallel_phi
+    integrand = phi_integral * np.sin(cache.theta_rad)
+    integral = (_trapz_numba(integrand, cache.theta_rad) if _HAVE_NUMBA
+                else np.trapezoid(integrand, cache.theta_rad))
+    radius_um = 0.5 * D_nm * 1e-3
+    return np.pi * radius_um**2 * integral
 
-def uhsas_geometry_cache(geom: UHSASGeom) -> _UHSASCache:
-    # θ grids
-    big_deg   = np.arange(geom.big_theta_min_deg,   geom.big_theta_max_deg,   geom.ring_step_deg, dtype=float)
-    small_deg = np.arange(geom.small_theta_min_deg, geom.small_theta_max_deg, geom.ring_step_deg, dtype=float)
-    th_big, th_small = np.deg2rad(big_deg), np.deg2rad(small_deg)
-    mu_big, mu_small = np.cos(th_big), np.cos(th_small)
-
-    # Effective disk diameters from the given half-angles at the same plane distance L
-    L = float(geom.aperture_distance_mm)
-    D_big_mm   = 2.0 * L * np.tan(np.deg2rad(geom.big_outer_halfangle_deg))
-    D_small_mm = 2.0 * L * np.tan(np.deg2rad(geom.inner_stop_halfangle_deg))
-
-    # POPS-style Δφ arrays (same indexing pattern as POPS)
-    dphi_big   = _disk_dphi_from_D_at_L(D_big_mm,   L, big_deg.size)
-    dphi_small = _disk_dphi_from_D_at_L(D_small_mm, L, small_deg.size)
-
-    return _UHSASCache(th_big, mu_big, dphi_big, th_small, mu_small, dphi_small)
 
 # -------------------------------
-# σ_col kernels (perpendicular pol.), cached
+# Collected cross-sections (fixed linear polarization, azimuth resolved)
 # -------------------------------
 
 def pops_csca(
@@ -179,36 +230,22 @@ def pops_csca(
     geom: POPSGeom,
     _cache: _POPSCache | None = None,
 ):
-    """
-    POPS σ_col(D, m) [µm²], perpendicular.
-    σ = ∫ (dσ/dΩ)(θ)·Δφ_disk(θ) dθ  +  (dσ/dΩ)(90°)·Ω_PMT
-    Geometry (Δφ, μ, θ-grid) pulled from cache.
+    """POPS collected cross-section [um^2] for linearly polarized light.
+
+    Integrate over the mirror cone and, only when explicitly configured,
+    the direct PMT cone. Both use sin(theta) dtheta dphi.
     """
     D_nm = np.atleast_1d(D_nm).astype(float)
-    if np.any(~np.isfinite(D_nm)) or np.any(D_nm <= 0):
-        raise ValueError("D_nm must be finite and > 0")
+    if D_nm.ndim != 1 or np.any(~np.isfinite(D_nm)) or np.any(D_nm <= 0):
+        raise ValueError("D_nm must be 1D, finite and > 0")
     if not np.isfinite(wavelength_nm) or wavelength_nm <= 0:
         raise ValueError("wavelength_nm must be finite and > 0")
-    a_um = 0.5 * D_nm * 1e-3   # radius in um
     c = _cache or pops_geometry_cache(geom)
-
-    out = np.empty_like(D_nm, float)
+    out = np.empty_like(D_nm)
     for i, D in enumerate(D_nm):
-        xsize = np.pi * (D / wavelength_nm)    # size parameter
-        PM = mie.phase_matrix(m_particle, xsize, c.mu, norm="qsca")
-        P11, P12 = PM[0,0,:], PM[0,1,:]
-        Pdet = 0.5*(P11 - P12)  # perpendicular
-        dcs = np.pi * (a_um[i]**2) * Pdet # differential scattering cross-section per unit solid angle
-
-        if _HAVE_NUMBA:
-            # dphi is the azimuthal acceptance width delta phi(theta)
-            mirror_term = _trapz_weighted_numba(dcs[c.ring_idx], c.dphi, c.theta_ring_rad) # type: ignore[arg-type]
-            pmt_term    = dcs[c.i_pmt] * c.omega_pmt
-        else:
-            mirror_term = np.trapz(dcs[c.ring_idx] * c.dphi, c.theta_ring_rad)
-            pmt_term    = dcs[c.i_pmt] * c.omega_pmt
-
-        out[i] = mirror_term + pmt_term
+        out[i] = _collected_cross_section(D, m_particle, wavelength_nm, c.mirror)
+        if c.direct is not None:
+            out[i] += _collected_cross_section(D, m_particle, wavelength_nm, c.direct)
     return out
 
 
@@ -236,46 +273,21 @@ def uhsas_csca(
     wavelength_nm: float,
     *,
     geom: UHSASGeom,
-    _cache: _UHSASCache | None = None,
+    _cache: _SideCollectionCache | None = None,
 ):
-    """
-    UHSAS σ_col(D, m) [µm²], perpendicular.
-    POPS-style azimuth for BOTH rings (BIG 33–147°, SMALL 75.2–104.8°),
-    then σ = ∫_BIG (dσ/dΩ)·Δφ_big(θ) dθ  −  ∫_SMALL (dσ/dΩ)·Δφ_small(θ) dθ
-    Geometry (θ, μ, Δφ) pulled from cache.
+    """UHSAS collected cross-section [um^2], per collection arm.
+
+    Integrate polarized intensity over the 14.8--57 degree annular cone,
+    with the full sin(theta) dtheta dphi solid-angle measure.
     """
     D_nm = np.atleast_1d(D_nm).astype(float)
-    if np.any(~np.isfinite(D_nm)) or np.any(D_nm <= 0):
-        raise ValueError("D_nm must be finite and > 0")
+    if D_nm.ndim != 1 or np.any(~np.isfinite(D_nm)) or np.any(D_nm <= 0):
+        raise ValueError("D_nm must be 1D, finite and > 0")
     if not np.isfinite(wavelength_nm) or wavelength_nm <= 0:
         raise ValueError("wavelength_nm must be finite and > 0")
-    a_um = 0.5 * D_nm * 1e-3
     c = _cache or uhsas_geometry_cache(geom)
-
-    out = np.empty_like(D_nm, float)
-    for i, D in enumerate(D_nm):
-        xsize = np.pi * (D / wavelength_nm)
-
-        # BIG ring
-        PMb = mie.phase_matrix(m_particle, xsize, c.mu_big, norm="qsca")
-        Pdet_b = 0.5*(PMb[0,0,:] - PMb[0,1,:])
-        dcs_b = np.pi * (a_um[i]**2) * Pdet_b
-        if _HAVE_NUMBA:
-            sig_big = _trapz_weighted_numba(dcs_b, c.dphi_big, c.th_big)  # type: ignore[arg-type]
-        else:
-            sig_big = np.trapz(dcs_b * c.dphi_big, c.th_big)
-
-        # SMALL exclusion ring
-        PMs = mie.phase_matrix(m_particle, xsize, c.mu_small, norm="qsca")
-        Pdet_s = 0.5*(PMs[0,0,:] - PMs[0,1,:])
-        dcs_s = np.pi * (a_um[i]**2) * Pdet_s
-        if _HAVE_NUMBA:
-            sig_small = _trapz_weighted_numba(dcs_s, c.dphi_small, c.th_small)  # type: ignore[arg-type]
-        else:
-            sig_small = np.trapz(dcs_s * c.dphi_small, c.th_small)
-
-        out[i] = sig_big - sig_small
-    return out
+    return np.asarray([_collected_cross_section(D, m_particle, wavelength_nm, c)
+                       for D in D_nm], dtype=float)
 
 
 def uhsas_csca_parallel(
@@ -284,7 +296,7 @@ def uhsas_csca_parallel(
     wavelength_nm: float,
     *,
     geom: UHSASGeom,
-    _cache: _UHSASCache | None = None,
+    _cache: _SideCollectionCache | None = None,
     n_jobs: int = -1,
     backend: str = "threads",
 ):
@@ -335,7 +347,16 @@ def build_sigma_lut(
     ng = np.arange(float(n_min), float(n_max) + 1e-12, float(n_step), dtype=float)
     kg = np.asarray(k_values, dtype=float)
 
-    root = zarr.open(zpath, mode="w")
+    # Validate geometry before touching disk, and never overwrite an existing LUT.
+    if kern == "pops":
+        cache = pops_geometry_cache(geom)
+    else:
+        cache = uhsas_geometry_cache(geom)
+    if os.path.lexists(zpath):
+        raise FileExistsError(f"LUT destination already exists: {zpath}; choose a new directory")
+    root = zarr.open_group(zpath, mode="w-")
+    root.attrs.update({"optical_model_version": OPTICAL_MODEL_VERSION,
+                       "build_complete": False})
     coords = root.create_group("coords")
     coords.create_array("D_nm", data=Dg)
     coords.create_array("n",    data=ng)
@@ -350,13 +371,11 @@ def build_sigma_lut(
 
     # ---- build geometry once ----
     if kern == "pops":
-        cache = pops_geometry_cache(geom)
         def _curve_for_n(n_val, k_val):
             m = complex(float(n_val), float(k_val))
             return pops_csca(Dg, m, wavelength_nm, geom=geom, _cache=cache).astype(np.float32)
         kernel_name = "POPS"
     else:
-        cache = uhsas_geometry_cache(geom)
         def _curve_for_n(n_val, k_val):
             m = complex(float(n_val), float(k_val))
             return uhsas_csca(Dg, m, wavelength_nm, geom=geom, _cache=cache).astype(np.float32)
@@ -381,13 +400,18 @@ def build_sigma_lut(
 
     # metadata (UHSAS: include effective disk diameters)
     attrs = {
-        "description": f"{kernel_name} collected scattering cross-section LUT (qsca norm, perpendicular pol.)",
+        "description": f"{kernel_name} collected scattering cross-section (polarized solid-angle integral)",
+        "optical_model_version": OPTICAL_MODEL_VERSION,
+        "build_complete": True,
+        "solid_angle_measure": "sin(theta) dtheta dphi",
+        "normalization": "miepython qsca; P11-P12 and P11+P12; no extra 0.5",
+        "collection_arms": 1,
         "units_sigma_col": "um^2",
         "D_range_nm": [float(D_min), float(D_max)],
         "n_range": [float(n_min), float(n_max), float(n_step)],
         "k_values": kg.tolist(),
         "wavelength_nm": float(wavelength_nm),
-        "polarization": "perpendicular",
+        "polarization": "linear E perpendicular to laser and central collection axis; azimuth resolved",
         "kernel": kernel_name,
     }
     if kern == "pops":
@@ -399,6 +423,10 @@ def build_sigma_lut(
             "distance_to_mirror_mm": float(geom.distance_to_mirror_mm),
             "pmt_aperture_d_mm": float(geom.pmt_aperture_d_mm),
             "pmt_center_deg": float(geom.pmt_center_deg),
+            "mirror_halfangle_deg": float(geom.mirror_halfangle_deg),
+            "pmt_aperture_distance_mm": geom.pmt_aperture_distance_mm,
+            "direct_collection": cache.direct is not None,
+            "geometry_reference": "Gao et al. 2016 Fig. 1; mirror-only default per Liu et al. 2021 Appendix A",
         })
     else:
         L = float(geom.aperture_distance_mm)
@@ -415,6 +443,8 @@ def build_sigma_lut(
             "inner_stop_halfangle_deg": float(geom.inner_stop_halfangle_deg),
             "eff_big_disk_d_mm": float(eff_big_d_mm),
             "eff_small_disk_d_mm": float(eff_small_d_mm),
+            "geometry_reference": "Howell et al. 2021 Fig. 1 and Appendix A",
+            "irradiance_basis": "total incident irradiance; symmetric counterpropagating beams",
         })
     root.attrs.update(attrs)
 
@@ -446,7 +476,27 @@ def build_uhsas_sigma_lut(
 # Trilinear query (generic + RAM class)
 # -------------------------------
 
-def sigma_query_zarr(zpath: str, D_nm: float, n: float, k: float) -> float:
+def _check_lut_model(root, *, allow_legacy=False):
+    version = root.attrs.get("optical_model_version")
+    if root.attrs.get("build_complete") is False:
+        raise ValueError("LUT build is incomplete; do not use it for diameter conversion.")
+    if version == OPTICAL_MODEL_VERSION:
+        if root.attrs.get("build_complete") is not True:
+            raise ValueError("Corrected LUT has no completed-build marker.")
+        return
+    if version is None and allow_legacy:
+        warnings.warn("Reading a legacy optical LUT for comparison only; it uses the "
+                      "uncorrected angular integration.", UserWarning, stacklevel=3)
+        return
+    raise ValueError(
+        f"LUT optical model {version!r} is not {OPTICAL_MODEL_VERSION!r}. "
+        "Rebuild into a NEW directory with the corrected optical code. "
+        "For deliberate legacy comparisons only, pass allow_legacy=True."
+    )
+
+
+def sigma_query_zarr(zpath: str, D_nm: float, n: float, k: float, *,
+                     allow_legacy=False) -> float:
     """
     Trilinear interpolation via SciPy RegularGridInterpolator (values clamped to grid).
     """
@@ -455,6 +505,7 @@ def sigma_query_zarr(zpath: str, D_nm: float, n: float, k: float) -> float:
     if D_nm <= 0:
         raise ValueError("D_nm must be > 0")
     z = zarr.open(zpath, mode="r")
+    _check_lut_model(z, allow_legacy=allow_legacy)
     Dg = z["coords/D_nm"][:].astype(float)
     ng = z["coords/n"][:].astype(float)
     kg = z["coords/k"][:].astype(float)
@@ -470,9 +521,14 @@ def sigma_query_zarr(zpath: str, D_nm: float, n: float, k: float) -> float:
 
 
 class SigmaLUT:
-    """Load σ_col(D,n,k) into RAM once. Fast trilinear queries."""
-    def __init__(self, zpath: str):
+    """Load a completed, current-model LUT for fast trilinear queries.
+
+    Historical tables require allow_legacy=True explicitly and emit a warning.
+    That option is for comparisons, not for corrected production.
+    """
+    def __init__(self, zpath: str, *, allow_legacy=False):
         z = zarr.open(zpath, mode="r")
+        _check_lut_model(z, allow_legacy=allow_legacy)
         self.zpath = zpath
         self.Dg  = z["coords/D_nm"][:].astype(float)
         self.ng  = z["coords/n"][:].astype(float)
@@ -560,13 +616,19 @@ def make_monotone_sigma_interpolator(
         iso.fit(x, y, sample_weight=sample_weight)
         yhat = iso.predict(x)
 
-    f_ll = PchipInterpolator(x, yhat, extrapolate=False)
-
     vals, inv, counts = np.unique(yhat, return_inverse=True, return_counts=True)
     if vals.size < 2:
         raise ValueError("Isotonic fit collapsed to a constant.")
     x_avg = np.bincount(inv, weights=x) / counts
-    finv_ll = PchipInterpolator(vals, x_avg, extrapolate=False)
+    # The old forward curve kept plateaus, while the inverse replaced each
+    # plateau with a mean diameter. Those were different curves. Use the same
+    # representative knots for BOTH directions, then invert the forward curve
+    # itself. Collapsing equal responses remains an explicit sizing approximation
+    # in the Mie-oscillation region, not a resolution of its physical ambiguity.
+    if increasing:
+        f_ll = PchipInterpolator(x_avg, vals, extrapolate=False)
+    else:
+        f_ll = PchipInterpolator(x_avg[::-1], vals[::-1], extrapolate=False)
 
     def f_sigma(Dq):
         Dq = np.asarray(Dq, float)
@@ -574,7 +636,29 @@ def make_monotone_sigma_interpolator(
 
     def g_diam(sig):
         sig = np.asarray(sig, float)
-        return np.exp(finv_ll(np.log(sig)))
+        result = np.full(sig.shape, np.nan)
+        flat = sig.ravel()
+        valid = np.isfinite(flat) & (flat > 0)
+        target = np.full(flat.shape, np.nan)
+        target[valid] = np.log(flat[valid])
+        # Accommodate only floating-point roundoff at the endpoint responses.
+        tol = 8 * np.finfo(float).eps * max(1.0, np.max(np.abs(vals)))
+        valid &= (target >= vals[0] - tol) & (target <= vals[-1] + tol)
+        if not np.any(valid):
+            return result
+        q = np.clip(target[valid], vals[0], vals[-1])
+        j = np.clip(np.searchsorted(vals, q, side="right") - 1, 0, vals.size - 2)
+        low = np.minimum(x_avg[j], x_avg[j + 1])
+        high = np.maximum(x_avg[j], x_avg[j + 1])
+        # Bracketed, vectorized bisection of the actual forward cubic. Forty-eight
+        # halvings make log-diameter error negligible relative to LUT resolution.
+        for _ in range(48):
+            mid = 0.5 * (low + high)
+            go_right = (f_ll(mid) < q) if increasing else (f_ll(mid) > q)
+            low = np.where(go_right, mid, low)
+            high = np.where(go_right, high, mid)
+        result.ravel()[valid] = np.exp(0.5 * (low + high))
+        return result
 
     return f_sigma, g_diam
 
@@ -686,4 +770,5 @@ __all__ = [
     "UHSAS_WAVELENGTH_NM",
     "RI_UHSAS_SRC",
     "RI_POPS_SRC",
+    "OPTICAL_MODEL_VERSION",
 ]

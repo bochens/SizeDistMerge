@@ -3,8 +3,9 @@
 The optical kernels now integrate over solid angle and account for the fixed
 laser polarization across each collection opening. This is a numerical and
 geometrical correction, not a new instrument calibration. Existing POPS/UHSAS
-LUTs and historical production outputs have not been replaced. Their effect on
-retrieved refractive indices and merged distributions still requires comparison.
+packaged LUTs have now been replaced by completed, versioned tables. Historical
+production outputs are unchanged; campaign-wide effects on retrieved refractive
+indices and merged distributions have not yet been established.
 
 ## What is calculated
 
@@ -124,15 +125,22 @@ lut = od.SigmaLUT("pops_mirror_only_check.zarr")
 For deliberately inspecting historical tables:
 
 ```python
-from sizedistmerge import SigmaLUT, lut_path
+from sizedistmerge import SigmaLUT
 
-old_lut = SigmaLUT(str(lut_path("pops")), allow_legacy=True)
+old_lut = SigmaLUT("path/to/preserved/old_pops.zarr", allow_legacy=True)
 ```
 
 That explicit option emits a warning. It does not correct the old table or
 restore the historical inverse algorithm. Exact historical reproduction needs
 the historical code as well. Production must use newly built and reviewed
 tables at explicit paths. Do not resume a run made with old LUTs into new output.
+
+The packaged tables contain 1000 logarithmically spaced diameters (60--6000 nm
+for POPS; 30--6000 nm for UHSAS), 1001 real refractive indices from 1.30 to 1.80,
+and 32 imaginary-index values from 0 to 0.8, including an exact 0.001 entry.
+The angular step is at most 0.25 degrees. Rebuild them with
+`notebooks/rebuild_optical_luts_solid_angle.ipynb`; the instrument detection
+range is narrower than the calculation grid.
 
 ## Verification boundary
 

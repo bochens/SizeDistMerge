@@ -1,6 +1,11 @@
 {
   "attributes": {
-    "description": "UHSAS collected scattering cross-section LUT (qsca norm, perpendicular pol.)",
+    "optical_model_version": "solid-angle-polarized-cones-v1",
+    "build_complete": true,
+    "description": "UHSAS collected scattering cross-section (polarized solid-angle integral)",
+    "solid_angle_measure": "sin(theta) dtheta dphi",
+    "normalization": "miepython qsca; P11-P12 and P11+P12; no extra 0.5",
+    "collection_arms": 1,
     "units_sigma_col": "um^2",
     "D_range_nm": [
       30.0,
@@ -21,6 +26,7 @@
       0.000471,
       0.000642,
       0.000875,
+      0.001,
       0.001193,
       0.001627,
       0.002218,
@@ -45,18 +51,20 @@
       0.8
     ],
     "wavelength_nm": 1054.0,
-    "polarization": "perpendicular",
+    "polarization": "linear E perpendicular to laser and central collection axis; azimuth resolved",
     "kernel": "UHSAS",
     "big_theta_min_deg": 33.0,
     "big_theta_max_deg": 147.0,
     "small_theta_min_deg": 75.2,
     "small_theta_max_deg": 104.8,
-    "ring_step_deg": 1.0,
+    "ring_step_deg": 0.25,
     "aperture_distance_mm": 8.0,
     "big_outer_halfangle_deg": 57.0,
     "inner_stop_halfangle_deg": 14.8,
     "eff_big_disk_d_mm": 24.637839421033327,
-    "eff_small_disk_d_mm": 4.227382348364713
+    "eff_small_disk_d_mm": 4.227382348364713,
+    "geometry_reference": "Howell et al. 2021 Fig. 1 and Appendix A",
+    "irradiance_basis": "total incident irradiance; symmetric counterpropagating beams"
   },
   "zarr_format": 3,
   "consolidated_metadata": null,

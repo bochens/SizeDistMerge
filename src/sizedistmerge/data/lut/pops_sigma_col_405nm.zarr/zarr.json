@@ -1,6 +1,11 @@
 {
   "attributes": {
-    "description": "POPS collected scattering cross-section LUT (mirror ring + 90\u00b0 PMT, qsca norm)",
+    "optical_model_version": "solid-angle-polarized-cones-v1",
+    "build_complete": true,
+    "description": "POPS collected scattering cross-section (polarized solid-angle integral)",
+    "solid_angle_measure": "sin(theta) dtheta dphi",
+    "normalization": "miepython qsca; P11-P12 and P11+P12; no extra 0.5",
+    "collection_arms": 1,
     "units_sigma_col": "um^2",
     "D_range_nm": [
       60.0,
@@ -21,6 +26,7 @@
       0.000471,
       0.000642,
       0.000875,
+      0.001,
       0.001193,
       0.001627,
       0.002218,
@@ -45,15 +51,19 @@
       0.8
     ],
     "wavelength_nm": 405.0,
-    "n_medium": 1.0,
-    "polarization": "perpendicular",
+    "polarization": "linear E perpendicular to laser and central collection axis; azimuth resolved",
+    "kernel": "POPS",
     "ring_theta_min_deg": 38.0,
-    "ring_theta_max_deg": 143.0,
-    "ring_step_deg": 1.0,
+    "ring_theta_max_deg": 142.0,
+    "ring_step_deg": 0.25,
     "mirror_diameter_mm": 25.0,
     "distance_to_mirror_mm": 14.3,
-    "pmt_aperture_d_mm": 5.0,
-    "pmt_center_deg": 90.0
+    "pmt_aperture_d_mm": 0.0,
+    "pmt_center_deg": 90.0,
+    "mirror_halfangle_deg": 52.0,
+    "pmt_aperture_distance_mm": null,
+    "direct_collection": false,
+    "geometry_reference": "Gao et al. 2016 Fig. 1; mirror-only default per Liu et al. 2021 Appendix A"
   },
   "zarr_format": 3,
   "consolidated_metadata": null,

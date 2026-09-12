@@ -104,8 +104,8 @@ Implementation: `src/sizedistmerge/diameter_conversion.py`
 
 Implementation: `src/sizedistmerge/optical_diameter.py`
 
-- `SigmaLUT` - Opens a stored POPS or UHSAS response lookup table.
-- `lut_path()` - Returns the packaged POPS or UHSAS LUT path.
+- `SigmaLUT` - Opens a stored POPS, UHSAS, or PCASP response lookup table.
+- `lut_path()` - Returns the packaged POPS, UHSAS, or PCASP LUT path.
 - `convert_do_lut()` - Maps an OPC diameter grid from one refractive index to
   another using a `SigmaLUT`.
 - `make_monotone_sigma_interpolator()` - Builds the monotone optical-response
@@ -115,9 +115,10 @@ Implementation: `src/sizedistmerge/optical_diameter.py`
 - `build_pops_sigma_lut()` and `build_uhsas_sigma_lut()` - Rebuild POPS or
   UHSAS response LUTs when the optical-response grid needs to be regenerated.
 
-Historical packaged LUTs are located through `sdm.lut_path("pops")` and
-`sdm.lut_path("uhsas")`. These paths do not certify that a table uses the
-current optical model. `SigmaLUT` checks its model version and completion marker.
+Packaged LUTs are located through `sdm.lut_path("pops")`,
+`sdm.lut_path("uhsas")`, and `sdm.lut_path("pcasp")`. These paths do not certify
+that a table uses the current optical model. `SigmaLUT` checks its model
+version and completion marker.
 See [Optical model and LUT migration](docs/optical_model.md) for rebuilding and
 explicitly loading old tables for comparisons.
 
@@ -232,7 +233,7 @@ Current package examples are in `notebooks/`:
 ## Repository Structure
 
 - `src/sizedistmerge/` - installable library package.
-- `src/sizedistmerge/data/lut/` - packaged POPS and UHSAS lookup tables.
+- `src/sizedistmerge/data/lut/` - packaged POPS, UHSAS, and PCASP lookup tables.
 - `arcsix_production/` - ARCSIX-specific production workflows and product
   writers.
 - `notebooks/` - runnable examples for package utilities and ARCSIX recipes.
@@ -240,17 +241,21 @@ Current package examples are in `notebooks/`:
 
 ## Packaged LUT Data
 
-The package preserves historical POPS and UHSAS LUTs under `src/sizedistmerge/data/lut/`:
+The package includes completed optical LUTs under `src/sizedistmerge/data/lut/`:
 
 - `pops_sigma_col_405nm.zarr`
 - `uhsas_sigma_col_1054nm.zarr`
+- `pcasp_sigma_col_632p8nm.zarr`
 
-These still use the old optical calculation and must be rebuilt before corrected
-production. The helpers below locate the files; they do not load or validate them:
+These use the corrected solid-angle optical calculation. The helpers below
+locate the files; `SigmaLUT` checks the optical-model version and build status
+when loading them. The PCASP table represents the nominal published geometry,
+not an individual instrument calibration; see [PCASP optical model](docs/pcasp_optics.md).
 
 ```python
 pops_lut_path = sdm.lut_path("pops")
 uhsas_lut_path = sdm.lut_path("uhsas")
+pcasp_lut_path = sdm.lut_path("pcasp")
 ```
 
 ## License

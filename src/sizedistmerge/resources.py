@@ -8,6 +8,7 @@ from pathlib import Path
 _LUT_NAMES = {
     "uhsas": "uhsas_sigma_col_1054nm.zarr",
     "pops": "pops_sigma_col_405nm.zarr",
+    "pcasp": "pcasp_sigma_col_632p8nm.zarr",
 }
 
 
@@ -25,12 +26,12 @@ def _normalize_lut_kind(kind: str) -> str:
 
 
 def lut_path(kind: str) -> Path:
-    """Return the POPS or UHSAS LUT directory path.
+    """Return the POPS, UHSAS, or PCASP LUT directory path.
 
     Parameters
     ----------
     kind
-        Either ``"uhsas"`` or ``"pops"``.
+        One of ``"uhsas"``, ``"pops"``, or ``"pcasp"``.
 
     Raises
     ------

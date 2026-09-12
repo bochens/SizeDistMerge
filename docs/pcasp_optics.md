@@ -79,6 +79,23 @@ It cancels in size conversion if source and target curves use the same basis.
 
 ## Reproduce the comparison and build a table
 
+The completed nominal table is packaged at
+`src/sizedistmerge/data/lut/pcasp_sigma_col_632p8nm.zarr`. Open it with:
+
+```python
+from sizedistmerge import SigmaLUT, lut_path
+
+pcasp_lut = SigmaLUT(lut_path("pcasp"))
+```
+
+It was built on 2026-09-12 from commit
+`1331884e0b3097efe880dc8c29d08bf133274033` with the settings below.
+All 32,032,000 cross-sections are finite and positive. Sampled stored values
+agree with direct calculations to within 5.2e-8 relative error; this checks
+table storage, not agreement with measured instrument calibration.
+The table metadata records the geometry, units, irradiance convention, and
+completion marker. The original build output is retained separately.
+
 [The PCASP build notebook](../notebooks/build_pcasp_lut.ipynb) downloads a
 hash-pinned copy of MieConScat, compiles its original solver and wrapper,
 runs the comparison, and only proceeds to build the LUT if the comparison

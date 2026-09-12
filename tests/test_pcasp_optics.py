@@ -112,6 +112,25 @@ def test_public_api():
     assert sdm.build_pcasp_sigma_lut is od.build_pcasp_sigma_lut
 
 
+def test_packaged_pcasp_lut():
+    from sizedistmerge import lut_path
+
+    path = lut_path(" PCASP ")
+    assert path.name == "pcasp_sigma_col_632p8nm.zarr"
+    lut = od.SigmaLUT(path)
+    root = zarr.open_group(path, mode="r")
+    assert root.attrs["instrument"] == "PCASP"
+    assert root.attrs["build_complete"] is True
+    assert lut.SIG.shape == (1000, 1001, 32)
+    setup = od.optical_setup_from_lut_metadata(root.attrs)
+    assert setup == od.pcasp_optical_setup()
+    indices = [0, 250, 500, 750, 999]
+    d = lut.Dg[indices]
+    ri = complex(lut.ng[560], lut.kg[9])
+    expected = od.setup_csca(d, ri, setup)["Collection"]
+    np.testing.assert_allclose(lut.SIG[indices, 560, 9], expected, rtol=1e-6, atol=0.)
+
+
 def test_saved_mieconscat_reference():
     """Original MieConScat 1.1.8 / Wiscombe solver, not miepython.
 

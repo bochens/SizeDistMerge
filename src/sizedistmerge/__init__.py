@@ -51,6 +51,11 @@ _MODULE_EXPORTS = {
     "optical_diameter": (
         "POPSGeom",
         "UHSASGeom",
+        "PCASPGeom",
+        "pcasp_optical_setup",
+        "pcasp_csca",
+        "build_pcasp_sigma_lut",
+        "PCASP_WAVELENGTH_NM",
         "pops_geometry_cache",
         "uhsas_geometry_cache",
         "pops_csca",

@@ -1,0 +1,108 @@
+# PCASP optical model
+
+This is a nominal optical model for PCASP, not a calibration of a particular
+aircraft instrument. It does not change POPS/UHSAS LUTs or ARCSIX production.
+
+## Source and geometry
+
+[Rosenberg et al. (2012)](https://doi.org/10.5194/amt-5-1147-2012),
+Section 1.2 and Table 1, describe a 632.8 nm laser and a parabolic collector:
+
+| Beam | Accepted scattering angles | Default fraction of total incident light |
+| --- | --- | --- |
+| Outgoing | 35-120 degrees | 0.5 |
+| Returning | 60-145 degrees | 0.5 |
+
+The paper treats collection as rotationally symmetric about the laser. These
+are **two views of one physical collector**, not two detectors. In the shared
+`OpticalSetup`, that collector is a 120-degree cone about the outgoing beam
+minus the concentric 35-degree cone. Reversing the beam produces the second
+angular range automatically. It is not a side-facing POPS/UHSAS cone.
+
+The [DMT PCASP-100X manual, DOC-0228 Rev C (2017)](https://dropletmeasure.wpenginepowered.com/wp-content/uploads/2020/02/DOC-0228-Rev-C-PCASP-100X-Manual.pdf),
+Section 2.1 and Figure 2, show the parabolic mirror, returning beam, focusing
+optics, and detector. Section 7 specifies PSL calibration using an index of
+1.58. This does **not** establish the calibration of every deployed PCASP;
+the source index remains an explicit input when converting campaign data.
+
+## Calculation and units
+
+`pcasp_csca` and `build_pcasp_sigma_lut` use the existing shared polarized
+Mie calculation for homogeneous spheres in air. They integrate the scattered
+power per unit solid angle over the collector. Units are square micrometers.
+Full-azimuth collection makes the integral independent of the chosen
+transverse polarization direction.
+
+The default beams have equal irradiance and are added incoherently (their
+intensities, not their electric fields, are added). The paper describes a
+crystal oscillator that prevents interference and reflects 99.9% of the
+outgoing light, then uses equal weights in Table 1. The default follows that
+table. `PCASPGeom(reflected_beam_ratio=.999)` permits the stated ratio instead.
+
+Our cross-section is `collected power / total incident irradiance`, consistent
+with the shared optical interface. Thus the equivalent angular weights are
+0.5 over 35-60 degrees, 1 over 60-120 degrees, and 0.5 over 120-145 degrees.
+Rosenberg's table uses 1, 2, and 1, relative to the outgoing beam. Multiply our
+cross-section by **2** to compare with that convention under equal beams.
+This is a known normalization change, not an empirical curve adjustment.
+It cancels in size conversion if source and target curves use the same basis.
+
+## Checks and limitations
+
+- The independent reference is the authors' MieConScat 1.1.8 source, using
+  Wiscombe's original Fortran MIEV0 solver and Rosenberg's `scatteringcs`
+  wrapper. The two published angular integrals are averaged to put both
+  calculations on the total-irradiance basis. Across 1,687 cases (241
+  diameters from 60 to 6000 nm and seven explicit refractive indices), the
+  maximum relative difference was **0.00760%**, the median **0.000208%**,
+  and the 95th percentile **0.00180%**. The comparison includes absorbing
+  and non-absorbing spheres. The reference uses 501 angular samples per
+  interval and single-precision amplitudes; this model uses a 0.25-degree
+  grid and double-precision amplitudes.
+- A separate calculation integrates unnormalized Mie amplitudes in
+  `cos(theta)` using Gaussian quadrature. It checks absolute units and the
+  angular integral independently of the implementation's normalized phase
+  matrix and trapezoidal grid.
+- Coaxial bands are integrated only within their accepted interval. Their
+  sharp rims are not smeared into adjacent uncollected angles.
+- The existing POPS/UHSAS numerical paths remain unchanged, checked against
+  their pre-interface saved values.
+- Rosenberg Figure 1 provides a useful response-curve comparison, but is not
+  measured detector calibration. Its caption lists material references rather
+  than each numerical refractive index. Do not claim an exact reproduction
+  of every material curve without those inputs.
+- The model omits measured aperture transmission, mirror/lens losses, gain
+  stages, particle-position effects, and instrument-specific optical offsets.
+  A measured calibration remains necessary for absolute detector signals.
+- A monotone curve, used for diameter conversion, is a chosen simplification
+  of the oscillatory Mie response, not additional instrument information.
+
+## Reproduce the comparison and build a table
+
+[The PCASP build notebook](../notebooks/build_pcasp_lut.ipynb) downloads a
+hash-pinned copy of MieConScat, compiles its original solver and wrapper,
+runs the comparison, and only proceeds to build the LUT if the comparison
+passes. It records the source hash, tested indices, numerical differences,
+setup, package versions, and build status. A Fortran and C++ compiler are
+needed for the reference check, not for normal package use.
+
+Set `PCASP_BUILD_LUT=0` before executing the notebook to perform only the
+comparison. Its full build uses six workers, 1000 diameters over 60-6000 nm,
+1001 real-index values over 1.30-1.80, and 32 imaginary-index values over
+0-0.8. The extended diameter grid is a calculation range, not a claim that
+PCASP measures that entire range. The 100 response groups used later to
+construct monotone conversion curves are not the 1000 diameter grid points.
+The notebook does not replace existing tables or start campaign processing.
+
+For a direct calculation without a table:
+
+```python
+from sizedistmerge.optical_diameter import pcasp_optical_setup, setup_csca
+
+setup = pcasp_optical_setup()
+sigma_um2 = setup_csca([100., 500., 1000., 3000.], 1.58+0j, setup)["Collection"]
+```
+
+The local paper-figure notebook passes this same setup to calculation and
+drawing. That manuscript notebook and its generated figures are maintained
+separately and are not distributed with this code change.

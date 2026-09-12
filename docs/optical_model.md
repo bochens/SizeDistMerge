@@ -151,3 +151,25 @@ forward/inverse consistency, and LUT build/version safeguards. These are
 checks of the stated idealized model, not validation against measured
 calibration data. Full production LUT rebuilds and campaign comparisons are
 separate steps.
+
+## Published curve comparisons
+
+`scripts/plot_corrected_optical_response.py` plots the packaged tables using
+Gao et al. (2016), Fig. 4 for POPS (1.615+0.001i and 1.45), and Fig. 2 of
+[ARM's UHSAS artifact report](https://www.arm.gov/publications/programdocs/doe-sc-arm-tr-304.pdf)
+for UHSAS (1.58, 1.50 and 1.40). That report is referenced by Section 7.5 of
+the [UHSAS handbook](https://www.arm.gov/publications/tech_reports/handbooks/uhsas_handbook.pdf).
+Plots retain calculated cross-section units rather than assigning an unknown
+detector gain. The calculation grid is not the instrument detection range.
+
+These are not exact reproductions of published calibration curves. In the
+ARM report's approximate equal-signal example, a 570 nm particle at n=1.58
+corresponds to 650 nm at n=1.50 or 830 nm at n=1.40. The present raw LUT gives
+about 616 and 699 nm, respectively. This difference in inferred diameter
+cannot be removed by a common signal scale factor. The report does not specify
+the complete angular/polarization calculation needed to identify its cause.
+Visual similarity alone must not be presented as quantitative validation.
+
+A separate plot uses Howell et al.'s four weakly/nonabsorbing calibration
+materials. Their aggregate-soot calculations are not represented by a
+homogeneous-sphere LUT and are not reproduced here.

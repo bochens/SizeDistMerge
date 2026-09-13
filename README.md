@@ -12,7 +12,7 @@ and weighted combination with Tikhonov smoothing.
 src/                  Python library files directly in this folder
 lut/                  POPS, UHSAS and PCASP optical tables
 notebooks/            reusable examples without saved outputs
-arcsix_production/    shared ARCSIX processing and QC helpers
+campaign_merge_production/  campaign-specific processing and QC helpers
 tests/                automated library checks
 docs/                 optical model and geometry documentation
 local/                ignored personal research work, not published

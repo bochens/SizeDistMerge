@@ -9,7 +9,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-ARCSIX_PRODUCTION = ROOT / "arcsix_production" / "arcsix_merge_production.py"
+ARCSIX_PRODUCTION = ROOT / "campaign_merge_production" / "arcsix_merge_production.py"
 
 
 def load_arcsix_production_module():

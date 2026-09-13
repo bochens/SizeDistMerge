@@ -96,20 +96,16 @@ table storage, not agreement with measured instrument calibration.
 The table metadata records the geometry, units, irradiance convention, and
 completion marker. The original build output is retained separately.
 
-[The PCASP build notebook](../notebooks/build_pcasp_lut.ipynb) downloads a
-hash-pinned copy of MieConScat, compiles its original solver and wrapper,
-runs the comparison, and only proceeds to build the LUT if the comparison
-passes. It records the source hash, tested indices, numerical differences,
-setup, package versions, and build status. A Fortran and C++ compiler are
-needed for the reference check, not for normal package use.
+The original reference-comparison notebook and its run records are retained
+locally. The checked reference values and source-archive hash remain in
+`tests/test_pcasp_optics.py`.
 
-Set `PCASP_BUILD_LUT=0` before executing the notebook to perform only the
-comparison. Its full build uses six workers, 1000 diameters over 60-6000 nm,
-1001 real-index values over 1.30-1.80, and 32 imaginary-index values over
-0-0.8. The extended diameter grid is a calculation range, not a claim that
-PCASP measures that entire range. The 100 response groups used later to
-construct monotone conversion curves are not the 1000 diameter grid points.
-The notebook does not replace existing tables or start campaign processing.
+The public [LUT build example](../notebooks/build_optical_luts_example.ipynb)
+uses the shared setup interface for PCASP, POPS and UHSAS. Builds are disabled
+by default and write to a separate directory. The extended diameter grid is a
+calculation range, not a claim about the instrument's measurement range.
+Response groups used for monotone conversion are separate from LUT diameter
+grid points. The example does not replace existing tables or launch a campaign.
 
 For a direct calculation without a table:
 

@@ -14,6 +14,16 @@ dist/
 .DS_Store
 /notebook/
 
+# Personal campaign processing, manuscript figures and exploratory analyses.
+/local/
+/outputs/
+/tmp/
+
+# Only reusable examples are published from notebooks/.
+/notebooks/*
+!/notebooks/*_example.ipynb
+!/notebooks/README.md
+
 # Local experiment notebooks/scripts.
 notebooks/arcsix_0605_fims_or_putls_merge.ipynb
 notebooks/arcsix_merge_1min_5min_package.ipynb

@@ -13,7 +13,7 @@ _LUT_NAMES = {
 
 
 def _source_tree_lut_root() -> Path:
-    return Path(__file__).resolve().parents[2] / "lut"
+    return Path(__file__).resolve().parents[1] / "lut"
 
 
 def _normalize_lut_kind(kind: str) -> str:
@@ -50,7 +50,7 @@ def lut_path(kind: str) -> Path:
 
     source_tree = _source_tree_lut_root() / name
     # In a checkout, use the single authoritative top-level LUT directory.
-    if (Path(__file__).resolve().parents[2] / "pyproject.toml").is_file() and source_tree.is_dir():
+    if (Path(__file__).resolve().parents[1] / "pyproject.toml").is_file() and source_tree.is_dir():
         return source_tree
 
     # setuptools packages that same directory as sizedistmerge.lut at install time.

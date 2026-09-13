@@ -172,7 +172,7 @@ The packaged tables contain 1000 logarithmically spaced diameters (60--6000 nm
 for POPS; 30--6000 nm for UHSAS), 1001 real refractive indices from 1.30 to 1.80,
 and 32 imaginary-index values from 0 to 0.8, including an exact 0.001 entry.
 The angular step is at most 0.25 degrees. Rebuild them with
-`notebooks/rebuild_optical_luts_solid_angle.ipynb`; the instrument detection
+`notebooks/build_optical_luts_example.ipynb`; the instrument detection
 range is narrower than the calculation grid.
 
 ## Verification boundary
@@ -187,7 +187,7 @@ separate steps.
 
 ## Published curve comparisons
 
-`scripts/plot_corrected_optical_response.py` plots the packaged tables using
+`local/scripts/plot_corrected_optical_response.py` (not distributed) plots the packaged tables using
 Gao et al. (2016), Fig. 4 for POPS (1.615+0.001i and 1.45), and Fig. 2 of
 [ARM's UHSAS artifact report](https://www.arm.gov/publications/programdocs/doe-sc-arm-tr-304.pdf)
 for UHSAS (1.58, 1.50 and 1.40). That report is referenced by Section 7.5 of

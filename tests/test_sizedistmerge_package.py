@@ -28,7 +28,7 @@ def load_arcsix_production_module():
 
 def test_import_sizedistmerge_from_outside_repo(tmp_path):
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(SRC)
+    env.pop("PYTHONPATH", None)  # Use the installed package mapping.
     code = """
 import importlib.util
 import sys
@@ -53,7 +53,7 @@ assert importlib.util.find_spec("sizedistmerge.arcsix_merge_production") is None
 assert sdm.lut_path("uhsas").name == "uhsas_sigma_col_1054nm.zarr"
 assert sdm.lut_path("pops").name == "pops_sigma_col_405nm.zarr"
 from pathlib import Path
-assert sdm.lut_path("uhsas") == Path(sdm.__file__).resolve().parents[2] / "lut/uhsas_sigma_col_1054nm.zarr"
+assert sdm.lut_path("uhsas") == Path(sdm.__file__).resolve().parents[1] / "lut/uhsas_sigma_col_1054nm.zarr"
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -129,8 +129,8 @@ def test_validation_errors_are_clear_for_bad_grids():
 
 
 def test_package_has_no_twomey_module():
-    assert not (SRC / "sizedistmerge" / "twomey.py").exists()
-    assert not (SRC / "sizedistmerge" / "twomey_inversion.py").exists()
+    assert not (SRC / "twomey.py").exists()
+    assert not (SRC / "twomey_inversion.py").exists()
 
 
 def test_arcsix_merge_production_has_single_canonical_api():
@@ -165,13 +165,13 @@ def test_arcsix_merge_production_has_single_canonical_api():
 
 
 def test_arcsix_production_has_no_compatibility_modules():
-    assert not (SRC / "sizedistmerge" / "merge_production.py").exists()
-    assert not (SRC / "sizedistmerge" / "arcsix_product.py").exists()
-    assert not (SRC / "sizedistmerge" / "arcsix_merge_production.py").exists()
+    assert not (SRC / "merge_production.py").exists()
+    assert not (SRC / "arcsix_product.py").exists()
+    assert not (SRC / "arcsix_merge_production.py").exists()
     assert ARCSIX_PRODUCTION.exists()
     assert not (ARCSIX_PRODUCTION.parent / "__init__.py").exists()
     assert not (
-        SRC / "sizedistmerge" / "pipelines" / "arcsix" / "arcsix_merge_production.py"
+        SRC / "pipelines" / "arcsix" / "arcsix_merge_production.py"
     ).exists()
 
 

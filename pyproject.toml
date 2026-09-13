@@ -32,8 +32,11 @@ include-package-data = true
 packages = ["sizedistmerge", "sizedistmerge.lut"]
 
 [tool.setuptools.package-dir]
-"" = "src"
+"sizedistmerge" = "src"
 "sizedistmerge.lut" = "lut"
 
 [tool.setuptools.package-data]
 "sizedistmerge.lut" = ["*.zarr/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

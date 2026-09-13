@@ -137,7 +137,7 @@ def test_saved_mieconscat_reference():
     Source archive SHA256:
     b90749e5c8445d897ef1490eac723673904a85bb98213cd5b7d06a10552106d1
     Values are means of the 35-120 and 60-145 degree integrals, in um^2.
-    Reproduce with notebooks/build_pcasp_lut.ipynb (PCASP_BUILD_LUT=0).
+    The original comparison notebook is retained locally, not shipped as an example.
     """
     d = [60.0, 189.73665961010286, 600.0000000000003, 1897.3665961010286, 6000.0]
     cases = [

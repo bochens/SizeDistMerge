@@ -11,7 +11,8 @@ from sizedistmerge import resources
 def test_checkout_uses_top_level_lut(kind):
     root = Path(__file__).resolve().parents[1]
     assert resources.lut_path(kind) == root / "lut" / resources._LUT_NAMES[kind]
-    assert not (root / "src/sizedistmerge/data/lut").exists()
+    assert not (root / "src/sizedistmerge").exists()
+    assert not (root / "src/data/lut").exists()
 
 
 def test_installed_lookup_uses_packaged_lut(tmp_path, monkeypatch):

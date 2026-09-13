@@ -48,13 +48,18 @@ def lut_path(kind: str) -> Path:
         allowed = ", ".join(sorted(_LUT_NAMES))
         raise ValueError(f"unknown LUT kind {kind!r}; expected one of: {allowed}") from exc
 
-    packaged = resources.files(__package__).joinpath("data", "lut", name)
-    if packaged.is_dir():
-        return Path(packaged)
-
     source_tree = _source_tree_lut_root() / name
-    if source_tree.is_dir():
+    # In a checkout, use the single authoritative top-level LUT directory.
+    if (Path(__file__).resolve().parents[2] / "pyproject.toml").is_file() and source_tree.is_dir():
         return source_tree
+
+    # setuptools packages that same directory as sizedistmerge.lut at install time.
+    try:
+        packaged = resources.files("sizedistmerge.lut").joinpath(name)
+    except ModuleNotFoundError:
+        packaged = None
+    if packaged is not None and packaged.is_dir():
+        return Path(packaged)
 
     raise FileNotFoundError(
         f"{name} was not found in package data or at {source_tree}. "

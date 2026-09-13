@@ -1,1 +1,1 @@
-recursive-include src/sizedistmerge/data/lut *
+recursive-include lut *

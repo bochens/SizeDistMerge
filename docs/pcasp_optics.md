@@ -80,7 +80,7 @@ It cancels in size conversion if source and target curves use the same basis.
 ## Reproduce the comparison and build a table
 
 The completed nominal table is packaged at
-`src/sizedistmerge/data/lut/pcasp_sigma_col_632p8nm.zarr`. Open it with:
+`lut/pcasp_sigma_col_632p8nm.zarr`. Open it with:
 
 ```python
 from sizedistmerge import SigmaLUT, lut_path

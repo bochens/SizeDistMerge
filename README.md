@@ -233,7 +233,7 @@ Current package examples are in `notebooks/`:
 ## Repository Structure
 
 - `src/sizedistmerge/` - installable library package.
-- `src/sizedistmerge/data/lut/` - packaged POPS, UHSAS, and PCASP lookup tables.
+- `lut/` - authoritative POPS, UHSAS, and PCASP lookup tables, also included in installations.
 - `arcsix_production/` - ARCSIX-specific production workflows and product
   writers.
 - `notebooks/` - runnable examples for package utilities and ARCSIX recipes.
@@ -241,7 +241,7 @@ Current package examples are in `notebooks/`:
 
 ## Packaged LUT Data
 
-The package includes completed optical LUTs under `src/sizedistmerge/data/lut/`:
+Completed optical LUTs are stored once, in the top-level `lut/` directory:
 
 - `pops_sigma_col_405nm.zarr`
 - `uhsas_sigma_col_1054nm.zarr`

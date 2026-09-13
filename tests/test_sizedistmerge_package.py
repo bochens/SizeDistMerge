@@ -52,7 +52,8 @@ assert "arcsix_merge_production" not in sdm.__all__
 assert importlib.util.find_spec("sizedistmerge.arcsix_merge_production") is None
 assert sdm.lut_path("uhsas").name == "uhsas_sigma_col_1054nm.zarr"
 assert sdm.lut_path("pops").name == "pops_sigma_col_405nm.zarr"
-assert "sizedistmerge/data/lut" in sdm.lut_path("uhsas").as_posix()
+from pathlib import Path
+assert sdm.lut_path("uhsas") == Path(sdm.__file__).resolve().parents[2] / "lut/uhsas_sigma_col_1054nm.zarr"
 """
     result = subprocess.run(
         [sys.executable, "-c", code],

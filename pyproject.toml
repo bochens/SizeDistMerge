@@ -27,12 +27,13 @@ dependencies = [
 [project.optional-dependencies]
 numba = ["numba"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["sizedistmerge*"]
-
 [tool.setuptools]
 include-package-data = true
+packages = ["sizedistmerge", "sizedistmerge.lut"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+"sizedistmerge.lut" = "lut"
 
 [tool.setuptools.package-data]
-sizedistmerge = ["data/lut/**/*"]
+"sizedistmerge.lut" = ["*.zarr/**/*"]

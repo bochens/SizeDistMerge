@@ -96,6 +96,107 @@ def test_uhsas_channels_and_total_irradiance_no_factor_two():
         assert np.array_equal(value, original)
 
 
+@pytest.mark.parametrize('kind', ['pops', 'pops_direct', 'uhsas'])
+def test_preset_wrappers_use_general_integrator_with_old_and_new_caches(monkeypatch, kind):
+    d, ri = [60., 300., 1000.], 1.615+.001j
+    if kind == 'uhsas':
+        geom, wavelength = od.UHSASGeom(), 1054.
+        fn, cache_fn, setup_fn = od.uhsas_csca, od.uhsas_geometry_cache, od.uhsas_optical_setup
+    else:
+        geom, wavelength = od.POPSGeom(), 405.
+        if kind == 'pops_direct':
+            # Synthetic optional aperture, not a measured POPS detector position.
+            geom = replace(geom, pmt_aperture_d_mm=5., pmt_aperture_distance_mm=20.)
+        fn, cache_fn, setup_fn = od.pops_csca, od.pops_geometry_cache, od.pops_optical_setup
+    setup = setup_fn(geom, wavelength_nm=wavelength)
+    real_integrator = od.setup_csca
+    result = real_integrator(d, ri, setup)
+    expected = result['Collection 1'] if kind == 'uhsas' else np.sum(list(result.values()), axis=0)
+    calls = []
+
+    def record_call(diameters, refractive_index, configuration, *, _cache=None):
+        calls.append((configuration, _cache))
+        return real_integrator(diameters, refractive_index, configuration, _cache=_cache)
+
+    monkeypatch.setattr(od, 'setup_csca', record_call)
+    for cache in (None, od.setup_geometry_cache(setup), cache_fn(geom)):
+        actual = fn(d, ri, wavelength, geom=geom, _cache=cache)
+        assert np.array_equal(actual, expected)
+    assert len(calls) == 3
+    assert all(configuration == setup for configuration, _ in calls)
+    assert all(cache is None or isinstance(cache, dict) for _, cache in calls)
+
+
+@pytest.mark.parametrize('kind,expected_paths', [('uhsas', 1), ('pcasp', 2)])
+def test_general_integrator_reuses_only_identical_scattering_geometries(monkeypatch, kind, expected_paths):
+    setup = od.uhsas_optical_setup() if kind == 'uhsas' else od.pcasp_optical_setup()
+    diameters, ri = [100., 500., 1000.], 1.6+.01j
+    expected = od.setup_csca(diameters, ri, setup)
+    original = od._collected_cross_section
+    calls = []
+
+    def count_call(d, refractive_index, wavelength, cache):
+        calls.append(d)
+        return original(d, refractive_index, wavelength, cache)
+
+    monkeypatch.setattr(od, '_collected_cross_section', count_call)
+    actual = od.setup_csca(diameters, ri, setup)
+    assert len(calls) == expected_paths*len(diameters)
+    assert list(actual) == list(expected)
+    for channel in expected:
+        assert np.array_equal(actual[channel], expected[channel])
+
+
+@pytest.mark.parametrize('kind', ['pops', 'pops_direct', 'uhsas'])
+def test_preset_luts_use_general_integrator_and_keep_output_conventions(tmp_path, monkeypatch, kind):
+    geom, wavelength = (od.UHSASGeom(), 1054.) if kind == 'uhsas' else (od.POPSGeom(), 405.)
+    if kind == 'pops_direct':
+        geom = replace(geom, pmt_aperture_d_mm=5., pmt_aperture_distance_mm=20.)
+    kernel = 'uhsas' if kind == 'uhsas' else 'pops'
+    real_integrator = od.setup_csca
+    calls = []
+
+    def record_call(diameters, refractive_index, setup, *, _cache=None):
+        calls.append((setup, _cache))
+        return real_integrator(diameters, refractive_index, setup, _cache=_cache)
+
+    monkeypatch.setattr(od, 'setup_csca', record_call)
+    path = tmp_path / (kind+'.zarr')
+    od.build_sigma_lut(str(path), kernel, wavelength, geom,
+        D_range=(100., 1000., 3), n_range=(1.5, 1.6, .1), k_values=(0., .001),
+        chunks=(3, 2, 1), jobs_per_k=1)
+    assert len(calls) == 4
+    assert all(isinstance(cache, dict) for _, cache in calls)
+    root = zarr.open(str(path), mode='r')
+    attrs = dict(root.attrs)
+    assert attrs['kernel'] == kernel.upper()
+    assert attrs['collection_arms'] == 1
+    assert attrs['optical_model_version'] == od.OPTICAL_MODEL_VERSION
+    full_setup = od.optical_setup_from_lut_metadata(attrs)
+    result = real_integrator(np.asarray(root['coords/D_nm']), 1.5, full_setup)
+    if kind == 'uhsas':
+        assert len(full_setup.beams) == 2 and len(full_setup.channels) == 2
+        assert attrs['response_channels'] == ['Collection 1']
+        expected = result['Collection 1']
+    else:
+        assert attrs['direct_collection'] == (kind == 'pops_direct')
+        assert attrs['response_channels'] == list(result)
+        expected = np.sum(list(result.values()), axis=0)
+    assert np.array_equal(root['sigma_col'][:, 0, 0], expected.astype(np.float32))
+
+
+@pytest.mark.parametrize('kind', ['pops', 'uhsas'])
+def test_preset_input_validation_is_performed_by_shared_path(kind):
+    geom, wavelength, fn = ((od.POPSGeom(), 405., od.pops_csca) if kind == 'pops'
+                            else (od.UHSASGeom(), 1054., od.uhsas_csca))
+    for diameters in ([0.], [-1.], [np.nan], [np.inf], [[100., 200.]]):
+        with pytest.raises(ValueError):
+            fn(diameters, 1.52, wavelength, geom=geom)
+    for invalid_wavelength in (0., -1., np.nan, np.inf):
+        with pytest.raises(ValueError):
+            fn([100.], 1.52, invalid_wavelength, geom=geom)
+
+
 def test_full_sphere_directional_integral_is_total_scattering():
     setup = od.uhsas_optical_setup()
     mu, weights = leggauss(100)

@@ -87,6 +87,39 @@ Sources:
 - [Howell et al. (2021)](https://doi.org/10.5194/amt-14-7381-2021), Fig. 1 and Appendices A--B.
 - [miepython normalization documentation](https://miepython.readthedocs.io/en/stable/03a_normalization.html).
 
+## Shared geometry and calculation
+
+POPS, UHSAS, PCASP and custom instruments all describe their accepted directions
+with `CollectionCone`, `CollectionChannel`, `IncidentBeam` and `OpticalSetup`.
+The instrument setup functions provide the preset numbers; `setup_geometry_cache`
+calculates the integration weights, and `setup_csca` performs the scattering
+calculation. The POPS/UHSAS wrappers and their LUT builders now use that same
+general path, rather than separate loops over particle diameters.
+
+```python
+from sizedistmerge import optical_diameter as od
+
+setup = od.uhsas_optical_setup(od.UHSASGeom())
+cache = od.setup_geometry_cache(setup)
+signals = od.setup_csca([100., 200., 500.], 1.52 + 0j, setup, _cache=cache)
+sigma_one_detector = signals["Collection 1"]
+```
+
+Separate detectors remain separate outputs. `uhsas_csca` returns only
+`Collection 1`, per total incident irradiance, without adding the opposite
+detector. `pops_csca` preserves its existing output: mirror collection plus
+the optional direct path if explicitly enabled. The default is still mirror-only.
+The general integrator reuses a calculated spectrum when angle grids and both
+polarization weights are exactly equal, avoiding repeated Mie work for symmetric
+UHSAS paths without changing the incident-intensity fractions.
+
+`pops_geometry_cache` and `uhsas_geometry_cache` remain compatibility views for
+existing callers that inspect the old cache fields. Their returned caches are
+still accepted by the instrument wrappers; new code can use
+`setup_geometry_cache(setup)` for every instrument. Physical settings, angular
+resolution, normalization and optical-model version are unchanged by this
+refactor, so this change alone does not require rebuilding LUTs.
+
 ## Diameter conversion
 
 The response curve is still grouped in log diameter and fitted to increase

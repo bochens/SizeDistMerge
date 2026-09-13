@@ -320,6 +320,7 @@ def setup_geometry_cache(setup: OpticalSetup):
 
 
 def pops_geometry_cache(geom: POPSGeom) -> _POPSCache:
+    """Legacy cache view; new calculations use setup_geometry_cache directly."""
     setup = pops_optical_setup(geom)
     caches = [channel_geometry_cache(setup.beams[0], ch, setup.angular_step_deg)
               for ch in setup.channels]
@@ -327,6 +328,7 @@ def pops_geometry_cache(geom: POPSGeom) -> _POPSCache:
 
 
 def uhsas_geometry_cache(geom: UHSASGeom) -> _SideCollectionCache:
+    """Legacy single-arm cache view, retained for callers inspecting its arrays."""
     setup = uhsas_optical_setup(geom)
     return channel_geometry_cache(setup.beams[0], setup.channels[0], setup.angular_step_deg)
 
@@ -349,6 +351,14 @@ def _collected_cross_section(D_nm, m_particle, wavelength_nm, cache):
     return np.pi * radius_um**2 * integral
 
 
+def _same_scattering_geometry(first, second):
+    """Whether two paths supply identical inputs to the scattering integral."""
+    if first is second:
+        return True
+    fields = ("theta_rad", "mu", "perp_phi", "parallel_phi")
+    return all(np.array_equal(getattr(first, name), getattr(second, name)) for name in fields)
+
+
 def setup_csca(D_nm, m_particle, setup: OpticalSetup, *, _cache=None):
     """Collected scattering cross-sections [um^2], returned by channel name.
 
@@ -361,11 +371,23 @@ def setup_csca(D_nm, m_particle, setup: OpticalSetup, *, _cache=None):
         raise ValueError("D_nm must be 1D, finite and positive")
     caches = setup_geometry_cache(setup) if _cache is None else _cache
     result = {}
+    evaluated = []
     for channel in setup.channels:
         values = np.zeros_like(diameters)
         for beam, cache in zip(setup.beams, caches[channel.name], strict=True):
-            values += beam.irradiance_fraction * np.array([
-                _collected_cross_section(d, m_particle, setup.wavelength_nm, cache) for d in diameters])
+            # Reuse identical integrals, not just similar-looking cones. For
+            # symmetric UHSAS optics this avoids recalculating four equal paths.
+            spectrum = None
+            for previous_cache, previous_spectrum in evaluated:
+                if _same_scattering_geometry(cache, previous_cache):
+                    spectrum = previous_spectrum
+                    break
+            if spectrum is None:
+                spectrum = np.array([
+                    _collected_cross_section(d, m_particle, setup.wavelength_nm, cache)
+                    for d in diameters])
+                evaluated.append((cache, spectrum))
+            values += beam.irradiance_fraction * spectrum
         result[channel.name] = values
     return result
 
@@ -445,25 +467,20 @@ def pops_csca(
     wavelength_nm: float,
     *,
     geom: POPSGeom,
-    _cache: _POPSCache | None = None,
+    _cache=None,
 ):
     """POPS collected cross-section [um^2] for linearly polarized light.
 
-    Integrate over the mirror cone and, only when explicitly configured,
-    the direct PMT cone. Both use sin(theta) dtheta dphi.
+    Uses the general setup integrator. Preserve the existing single-array
+    output: mirror collection plus the optional explicitly configured direct
+    path. Old _POPSCache inputs are accepted for caller compatibility.
     """
-    D_nm = np.atleast_1d(D_nm).astype(float)
-    if D_nm.ndim != 1 or np.any(~np.isfinite(D_nm)) or np.any(D_nm <= 0):
-        raise ValueError("D_nm must be 1D, finite and > 0")
-    if not np.isfinite(wavelength_nm) or wavelength_nm <= 0:
-        raise ValueError("wavelength_nm must be finite and > 0")
-    c = _cache or pops_geometry_cache(geom)
-    out = np.empty_like(D_nm)
-    for i, D in enumerate(D_nm):
-        out[i] = _collected_cross_section(D, m_particle, wavelength_nm, c.mirror)
-        if c.direct is not None:
-            out[i] += _collected_cross_section(D, m_particle, wavelength_nm, c.direct)
-    return out
+    setup = pops_optical_setup(geom, wavelength_nm=wavelength_nm)
+    if isinstance(_cache, _POPSCache):
+        paths = (_cache.mirror,) if _cache.direct is None else (_cache.mirror, _cache.direct)
+        _cache = {channel.name: (path,) for channel, path in zip(setup.channels, paths, strict=True)}
+    result = setup_csca(D_nm, m_particle, setup, _cache=_cache)
+    return np.sum(list(result.values()), axis=0)
 
 
 def pops_csca_parallel(  # parallel calculation. As in parallel computing, not polarization.
@@ -472,12 +489,13 @@ def pops_csca_parallel(  # parallel calculation. As in parallel computing, not p
     wavelength_nm: float,
     *,
     geom: POPSGeom,
-    _cache: _POPSCache | None = None,
+    _cache=None,
     n_jobs: int = -1,
     backend: str = "threads",
 ):
     D_nm = np.atleast_1d(D_nm).astype(float)
-    c = _cache or pops_geometry_cache(geom)
+    c = (_cache if _cache is not None else
+         setup_geometry_cache(pops_optical_setup(geom, wavelength_nm=wavelength_nm)))
     def _one(d):
         return pops_csca([d], m_particle, wavelength_nm, geom=geom, _cache=c)[0]
     vals = Parallel(n_jobs=n_jobs, prefer=backend)(delayed(_one)(float(d)) for d in D_nm)
@@ -490,21 +508,18 @@ def uhsas_csca(
     wavelength_nm: float,
     *,
     geom: UHSASGeom,
-    _cache: _SideCollectionCache | None = None,
+    _cache=None,
 ):
     """UHSAS collected cross-section [um^2], per collection arm.
 
-    Integrate polarized intensity over the 14.8--57 degree annular cone,
-    with the full sin(theta) dtheta dphi solid-angle measure.
+    Uses the general setup integrator with both opposing beams. Return only
+    Collection 1, not the sum of the two detectors. A legacy single-arm cache
+    remains valid for the identical beam-relative geometries of this preset.
     """
-    D_nm = np.atleast_1d(D_nm).astype(float)
-    if D_nm.ndim != 1 or np.any(~np.isfinite(D_nm)) or np.any(D_nm <= 0):
-        raise ValueError("D_nm must be 1D, finite and > 0")
-    if not np.isfinite(wavelength_nm) or wavelength_nm <= 0:
-        raise ValueError("wavelength_nm must be finite and > 0")
-    c = _cache or uhsas_geometry_cache(geom)
-    return np.asarray([_collected_cross_section(D, m_particle, wavelength_nm, c)
-                       for D in D_nm], dtype=float)
+    setup = uhsas_optical_setup(geom, wavelength_nm=wavelength_nm)
+    if isinstance(_cache, _SideCollectionCache):
+        _cache = {channel.name: (_cache,) * len(setup.beams) for channel in setup.channels}
+    return setup_csca(D_nm, m_particle, setup, _cache=_cache)["Collection 1"]
 
 
 def uhsas_csca_parallel(
@@ -513,12 +528,13 @@ def uhsas_csca_parallel(
     wavelength_nm: float,
     *,
     geom: UHSASGeom,
-    _cache: _SideCollectionCache | None = None,
+    _cache=None,
     n_jobs: int = -1,
     backend: str = "threads",
 ):
     D_nm = np.atleast_1d(D_nm).astype(float)
-    c = _cache or uhsas_geometry_cache(geom)
+    c = (_cache if _cache is not None else
+         setup_geometry_cache(uhsas_optical_setup(geom, wavelength_nm=wavelength_nm)))
     def _one(d):
         return uhsas_csca([d], m_particle, wavelength_nm, geom=geom, _cache=c)[0]
     vals = Parallel(n_jobs=n_jobs, prefer=backend)(delayed(_one)(float(d)) for d in D_nm)
@@ -573,11 +589,9 @@ def build_sigma_lut(
 
     # Validate geometry before touching disk, and never overwrite an existing LUT.
     if kern == "pops":
-        cache = pops_geometry_cache(geom)
         setup = pops_optical_setup(geom, wavelength_nm=wavelength_nm)
         response_channels = [c.name for c in setup.channels]
     elif kern == "uhsas":
-        cache = uhsas_geometry_cache(geom)
         setup = uhsas_optical_setup(geom, wavelength_nm=wavelength_nm)
         response_channels = [setup.channels[0].name]
     else:
@@ -587,10 +601,11 @@ def build_sigma_lut(
         selected = [c for c in setup.channels if c.name == response_channel]
         if len(selected) != 1:
             raise ValueError("select exactly one named response_channel for the LUT")
-        calculation_setup = OpticalSetup(setup.wavelength_nm, setup.beams, tuple(selected),
-                                         setup.aerosol_direction, setup.angular_step_deg)
-        cache = setup_geometry_cache(calculation_setup)
         response_channels = [response_channel]
+    selected = tuple(c for c in setup.channels if c.name in response_channels)
+    calculation_setup = OpticalSetup(setup.wavelength_nm, setup.beams, selected,
+                                     setup.aerosol_direction, setup.angular_step_deg)
+    cache = setup_geometry_cache(calculation_setup)
     if os.path.lexists(zpath):
         raise FileExistsError(f"LUT destination already exists: {zpath}; choose a new directory")
     root = zarr.open_group(zpath, mode="w-")
@@ -608,22 +623,14 @@ def build_sigma_lut(
         chunks=chunks,
     )
 
-    # ---- build geometry once ----
-    if kern == "pops":
-        def _curve_for_n(n_val, k_val):
-            m = complex(float(n_val), float(k_val))
-            return pops_csca(Dg, m, wavelength_nm, geom=geom, _cache=cache).astype(np.float32)
-        kernel_name = "POPS"
-    elif kern == "uhsas":
-        def _curve_for_n(n_val, k_val):
-            m = complex(float(n_val), float(k_val))
-            return uhsas_csca(Dg, m, wavelength_nm, geom=geom, _cache=cache).astype(np.float32)
-        kernel_name = "UHSAS"
-    else:
-        def _curve_for_n(n_val, k_val):
-            m = complex(float(n_val), float(k_val))
-            return setup_csca(Dg, m, calculation_setup, _cache=cache)[response_channel].astype(np.float32)
-        kernel_name = "CUSTOM"
+    # All instruments use the same integrator and precomputed setup cache.
+    # UHSAS/custom select one detector; POPS retains its optional path sum.
+    kernel_name = kern.upper()
+
+    def _curve_for_n(n_val, k_val):
+        m = complex(float(n_val), float(k_val))
+        result = setup_csca(Dg, m, calculation_setup, _cache=cache)
+        return np.sum(list(result.values()), axis=0).astype(np.float32)
 
     block_n = chunks[1]
     total_k = kg.size
@@ -672,7 +679,7 @@ def build_sigma_lut(
             "pmt_center_deg": float(geom.pmt_center_deg),
             "mirror_halfangle_deg": float(geom.mirror_halfangle_deg),
             "pmt_aperture_distance_mm": geom.pmt_aperture_distance_mm,
-            "direct_collection": cache.direct is not None,
+            "direct_collection": len(response_channels) > 1,
             "geometry_reference": "Gao et al. 2016 Fig. 1; mirror-only default per Liu et al. 2021 Appendix A",
         })
     elif kern == "uhsas":

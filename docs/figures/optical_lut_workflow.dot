@@ -11,16 +11,24 @@ digraph lut {
   imag [label="Imaginary refractive-index grid\nk", fillcolor="#e5f0f4"];
   detector [label="Selected detector\nChannel name", fillcolor="#e5f0f4"];
   build [label="build_setup_sigma_lut() → build_sigma_lut()\nPrepare the selected detector and sampling grids"];
-  cache [label="setup_geometry_cache()\nAccepted angles and polarization weights"];
+  cache [label="setup_geometry_cache()\nFor each detector and incident beam"];
+  mask [label="Resolve accepted azimuths at each θ\nA(θ,φ) = 1 inside collected directions, 0 outside\nCombine collection cones; remove exclusions"];
+  phi [label=<Integrate over φ analytically (0 to 2π)<BR/>W<SUB>⊥</SUB>(θ) = ∫ A(θ,φ) cos<SUP>2</SUP>φ dφ<BR/>W<SUB>∥</SUB>(θ) = ∫ A(θ,φ) sin<SUP>2</SUP>φ dφ>];
   pairs [label="For each n, k pair\nEvaluate the diameter grid"];
   integration [label="setup_csca() → _collected_cross_section()\nCalculate the detector response"];
-  mie [label="mie.phase_matrix(norm=\"qsca\")\nP11 − P12 and P11 + P12"];
-  integral [label="Apply cached angular weights\nIntegrate with sin(θ) dθ; multiply by πr²"];
+  mie [label="mie.phase_matrix(norm=\"qsca\")\nx = πD/λ; evaluate at cos θ"];
+  intensity [label="Polarized Mie intensity terms\nI⊥(θ) = P11 − P12\nI∥(θ) = P11 + P12"];
+  combine [label="Scattering after φ integration\nF(θ) = I⊥(θ) W⊥(θ) + I∥(θ) W∥(θ)"];
+  theta [label="Integrate over θ numerically (0 to π)\nJ = ∫ F(θ) sin θ dθ\nTrapezoidal rule on the angular grid"];
+  area [label="Convert efficiency to cross-section\nσ_beam = π(D/2)² J\nUse D in µm here to obtain µm²"];
+  beams [label="Combine the incident beams\nσ_detector = ∑ f_beam σ_beam\nf_beam = fraction of total incident irradiance"];
   output [label="Saved LUT · Zarr\nσ(D, n, k) and optical metadata", fillcolor="#eaf1e8", penwidth=1.5];
   toml -> load;
   {rank=same; load; diameter; real; imag; detector;}
   load -> build; diameter -> build; real -> build; imag -> build; detector -> build;
   build -> cache; build -> pairs;
-  pairs -> integration -> mie -> integral -> output;
-  cache -> integral;
+  pairs -> integration -> mie -> intensity -> combine;
+  cache -> mask -> phi -> combine;
+  {rank=same; intensity; phi;}
+  combine -> theta -> area -> beams -> output;
 }

@@ -1,5 +1,17 @@
 # Reading and configuring the optical code
 
+## Workflow overview
+
+![LUT construction and optical diameter conversion](figures/optical_workflow.svg)
+
+The left column builds the lookup table (LUT); the right column uses that saved
+table to convert diameters. Arrows show processing order, not an exhaustive
+list of direct function calls. The dashed link shows reuse of the saved LUT.
+
+[Mermaid diagram, editing instructions, and caption](figures/optical_workflow.md) ·
+[Graphviz source for the rendered figure](figures/optical_workflow.dot) ·
+[SVG figure](figures/optical_workflow.svg)
+
 ## Start with the calculation you need
 
 The beginning of `src/optical_diameter.py` contains the main calculations.

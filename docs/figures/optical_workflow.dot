@@ -1,0 +1,38 @@
+// Editable figure source. Run these commands from docs/figures:
+// dot -Tsvg optical_workflow.dot -o optical_workflow.svg
+// dot -Tpng -Gdpi=180 optical_workflow.dot -o optical_workflow.png
+digraph optics {
+  graph [rankdir=TB, newrank=true, bgcolor="white", pad="0.18", nodesep="0.9", ranksep="0.32", splines=ortho];
+  node [shape=box, style="rounded,filled", fillcolor="#f4f7fa", color="#a8b6c2", fontname="Helvetica", fontsize=12, width=3.65, margin="0.13,0.10"];
+  edge [color="#647581", arrowsize=0.7, penwidth=1.1, fontname="Helvetica", fontsize=10];
+
+  subgraph cluster_build {
+    label="(a)  LUT construction"; fontname="Helvetica-Bold"; fontsize=15;
+    color="white"; margin=12;
+    settings [label="OPC settings · TOML\nWavelength, beams, polarization, cones", fillcolor="#e5f0f4"];
+    load [label="load_optical_setup()\nRead and validate the geometry"];
+    build [label="build_setup_sigma_lut()\n→ build_sigma_lut()\nSelect detector and diameter / RI grids"];
+    cache [label="setup_geometry_cache()\n→ channel_geometry_cache()\nAccepted angles and polarization weights"];
+    integrate [label="setup_csca()\n→ _collected_cross_section()\nMie intensities × angular weights\nIntegrate over solid angle; multiply by πr²"];
+    saved [label="Saved LUT · Zarr\nCross-sections on the D, n, k grids\nand the optical setup used", fillcolor="#e5f0f4", penwidth=1.5];
+    settings -> load -> build -> cache -> integrate -> saved;
+  }
+  subgraph cluster_convert {
+    label="(b)  Diameter conversion"; fontname="Helvetica-Bold"; fontsize=15;
+    color="white"; margin=12;
+    read [label="SigmaLUT(path)\nRead and validate the saved LUT", fillcolor="#e5f0f4", penwidth=1.5];
+    convert [label="convert_do_lut()\nInput bin edges and both refractive indices"];
+    query [label="SigmaLUT.sigma_curve()\nInterpolate calibration and particle responses"];
+    smooth [label="make_monotone_sigma_interpolator()\nLog-space representatives → isotonic fit\nCollapse plateaus → PCHIP"];
+    match [label="Match the same scattering signal\nCalibration diameter → cross-section\n→ diameter for the assumed particle RI"];
+    output [label="Converted bin edges\nCheck positive, strictly increasing diameters", fillcolor="#eaf1e8"];
+    read -> convert -> query -> smooth -> match -> output;
+  }
+  {rank=same; settings; read;}
+  {rank=same; load; convert;}
+  {rank=same; build; query;}
+  {rank=same; cache; smooth;}
+  {rank=same; integrate; match;}
+  {rank=same; saved; output;}
+  saved:e -> read:w [constraint=false, style=dashed, color="#398196", penwidth=1.3];
+}

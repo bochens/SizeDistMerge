@@ -56,6 +56,9 @@ separate and weights beams by their fraction of total incident intensity.
   in-memory experiments with different angles or wavelengths.
 - `src/optical_lut.py`: table building, disk access, and interpolation.
 - `opc_setups/pops.toml`, `uhsas.toml`, `pcasp.toml`: commented instrument settings.
+- `opc_setups/grimm_11d_unpolarized_assumed.toml`: the provisional GRIMM model,
+  using assumed 1.109 openings and unpolarized illumination. Neither assumption
+  is promoted to a verified 11-D instrument specification by putting it in TOML.
 
 TOML is a plain-text settings format that allows comments. The files specify
 wavelength in nm, angular step in degrees, directions as `[x, y, z]`, beam

@@ -28,8 +28,8 @@ def load_optical_setup(name_or_path):
             settings = tomllib.load(stream)
     else:
         name = str(name_or_path).lower()
-        if name not in ('pops', 'uhsas', 'pcasp'):
-            raise ValueError('Choose pops, uhsas, pcasp, or a path ending in .toml')
+        if name not in ('pops', 'uhsas', 'pcasp', 'grimm_11d_unpolarized_assumed'):
+            raise ValueError('Choose pops, uhsas, pcasp, grimm_11d_unpolarized_assumed, or a path ending in .toml')
         checkout_file = Path(__file__).resolve().parents[1] / 'opc_setups' / f'{name}.toml'
         if (Path(__file__).resolve().parents[1] / 'pyproject.toml').is_file():
             source = checkout_file

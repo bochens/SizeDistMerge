@@ -1,0 +1,29 @@
+schema_version = 1
+name = "GRIMM 11-D — assumed geometry, unpolarized model"
+reference = "Existing GRIMM LUT model: doi:10.1016/j.jaerosci.2008.07.006; doi:10.5194/amt-15-2345-2022"
+notes = "Geometry assumed from 1.109, not verified for 11-D. Unpolarized illumination is a modelling assumption, not a verified property of the instrument. No optical losses or detector gain."
+wavelength_nm = 655.0
+angular_step_deg = 0.125
+aerosol_direction = [-1.0, 0.0, 0.0]
+
+# One unpolarized source is represented by two equal, incoherent polarization
+# components. Both propagate along z; these are NOT counter-propagating lasers.
+[[beams]]
+direction = [0.0, 0.0, 1.0]
+polarization = [1.0, 0.0, 0.0]
+irradiance_fraction = 0.5
+[[beams]]
+direction = [0.0, 0.0, 1.0]
+polarization = [0.0, 1.0, 0.0]
+irradiance_fraction = 0.5
+
+# Both collection regions feed one detector. Angles are cone half-angles
+# about the indicated axes. The 9-degree cone is collected, not excluded.
+[[channels]]
+name = "Photodiode"
+[[channels.collect]]
+axis = [0.0, 1.0, 0.0]
+half_angle_deg = 60.0
+[[channels.collect]]
+axis = [0.0, -1.0, 0.0]
+half_angle_deg = 9.0

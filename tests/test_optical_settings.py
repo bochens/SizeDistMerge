@@ -67,10 +67,36 @@ def test_installed_style_settings_and_import_order(tmp_path):
 from sizedistmerge.optical_lut import SigmaLUT
 from sizedistmerge.optical_geometry import load_optical_setup
 from sizedistmerge.optical_diameter import setup_csca
-for name in ('pops', 'uhsas', 'pcasp'):
+for name in ('pops', 'uhsas', 'pcasp', 'grimm_11d_unpolarized_assumed'):
     setup = load_optical_setup(name)
     assert setup_csca([100.], 1.5, setup)
 '''
     result = subprocess.run([sys.executable, '-c', code], cwd=tmp_path,
                             env=environment, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_grimm_toml_reproduces_original_notebook_setup():
+    # This is the numerical setup used by the original provisional LUT build.
+    # It is a preservation check, not verification of the real 11-D optics.
+    previous = optical_geometry.OpticalSetup(
+        wavelength_nm=655.,
+        beams=(
+            optical_geometry.IncidentBeam((0, 0, 1), (1, 0, 0), .5),
+            optical_geometry.IncidentBeam((0, 0, 1), (0, 1, 0), .5),
+        ),
+        channels=(optical_geometry.CollectionChannel('Photodiode', (
+            optical_geometry.CollectionCone((0, 1, 0), 60.),
+            optical_geometry.CollectionCone((0, -1, 0), 9.),
+        )),),
+        aerosol_direction=(-1, 0, 0), angular_step_deg=.125,
+    )
+    configured = optical_geometry.load_optical_setup('grimm_11d_unpolarized_assumed')
+    assert configured.to_dict() == previous.to_dict()
+    from_path = optical_geometry.load_optical_setup(ROOT/'opc_setups/grimm_11d_unpolarized_assumed.toml')
+    assert from_path == configured
+    diameters = np.geomspace(200., 40000., 20)
+    for refractive_index in (1.3, 1.59+.001j, 1.8+.1j):
+        before = optics.setup_csca(diameters, refractive_index, previous)['Photodiode']
+        after = optics.setup_csca(diameters, refractive_index, configured)['Photodiode']
+        np.testing.assert_array_equal(before, after)

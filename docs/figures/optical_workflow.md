@@ -1,70 +1,97 @@
-# Optical calculation and diameter-conversion workflow
+# Optical workflows
 
-[Rendered SVG](optical_workflow.svg) · [Editable Graphviz source](optical_workflow.dot)
+These are two separate workflows. Blue boxes identify independent inputs;
+green boxes identify outputs. Arrows show processing order or data dependencies,
+not an exhaustive graph of direct function calls. RI means refractive index.
 
-This is a workflow diagram with the principal function calls, not an exhaustive
-call graph. Arrows show processing order; the dashed link is the saved LUT
-passed from construction to later use. RI means refractive index. PCHIP is a
-shape-preserving piecewise cubic interpolation method.
+## 1. LUT calculation
+
+![LUT calculation](optical_lut_workflow.svg)
+
+[Editable Graphviz source](optical_lut_workflow.dot)
+
+The geometry file includes wavelength, beam direction and polarization,
+collection/exclusion cones, and angular spacing. Diameter, real-RI, and
+imaginary-RI grids are separate build inputs, not geometry settings.
+The selected detector is also an explicit build input.
 
 ```mermaid
-flowchart LR
-    subgraph A["(a) LUT construction"]
-        direction TB
-        T["OPC settings · TOML"] --> L["load_optical_setup()<br/>Read and validate geometry"]
-        L --> B["build_setup_sigma_lut()<br/>→ build_sigma_lut()<br/>Select detector and D, n, k grids"]
-        B --> C["setup_geometry_cache()<br/>→ channel_geometry_cache()<br/>Accepted angles and polarization weights"]
-        C --> I["setup_csca()<br/>→ _collected_cross_section()<br/>Mie intensities × angular weights<br/>Integrate over solid angle; multiply by πr²"]
-        I --> Z[("Saved LUT · Zarr<br/>Cross-sections and optical metadata")]
-    end
-    subgraph B2["(b) Diameter conversion"]
-        direction TB
-        R["SigmaLUT(path)<br/>Read and validate table"] --> D["convert_do_lut()<br/>Input edges and both refractive indices"]
-        D --> Q["SigmaLUT.sigma_curve()<br/>Interpolate responses for both RIs"]
-        Q --> S["make_monotone_sigma_interpolator()<br/>Log-space representatives → isotonic fit<br/>Collapse plateaus → PCHIP"]
-        S --> M["Match equal scattering cross-section<br/>Calibration diameter → signal<br/>→ assumed-particle diameter"]
-        M --> E["Converted bin edges<br/>Validate positivity and strict ordering"]
-    end
-    Z -.-> R
+flowchart TD
+    T["OPC geometry TOML"] --> L["load_optical_setup()"]
+    D["Diameter grid D"] --> B["build_setup_sigma_lut() → build_sigma_lut()"]
+    N["Real-RI grid n"] --> B
+    K["Imaginary-RI grid k"] --> B
+    C["Selected detector"] --> B
+    L --> B
+    B --> W["setup_geometry_cache(): angular and polarization weights"]
+    B --> P["For each n, k pair: evaluate the diameter grid"]
+    P --> I["setup_csca() → _collected_cross_section()"]
+    I --> M["mie.phase_matrix(): P11 − P12 and P11 + P12"]
+    M --> A["Apply angular weights; integrate with sin(θ) dθ; multiply by πr²"]
+    W --> A
+    A --> Z["Saved LUT: σ(D, n, k) and optical metadata"]
 ```
+
+## 2. Optical diameter conversion
+
+![Optical diameter conversion](optical_conversion_workflow.svg)
+
+[Editable Graphviz source](optical_conversion_workflow.dot)
+
+`convert_do_lut()` coordinates the query, smoothing, equal-signal mapping,
+and edge-validation steps below. `SigmaLUT(path)` is initialized by the caller.
+No TOML reading or new Mie integration is needed during conversion.
+
+```mermaid
+flowchart TD
+    Z["Saved LUT"] --> R["SigmaLUT(path): read and validate"]
+    MS["Calibration RI"] --> QS["sigma_curve(): calibration response"]
+    MT["Assumed particle RI"] --> QT["sigma_curve(): assumed-particle response"]
+    R --> QS
+    R --> QT
+    QS --> SS["make_monotone_sigma_interpolator(): calibration"]
+    QT --> ST["make_monotone_sigma_interpolator(): assumed particle"]
+    B["Smoothing interval count"] --> SS
+    B --> ST
+    SS --> F["f_sigma(): diameter → signal"]
+    E["Reported bin edges"] --> F
+    F --> G["g_diam(): same signal → new diameter"]
+    ST --> G
+    G --> V["Validate converted edges"]
+    V --> O["Converted bin edges"]
+```
+
+Smoothing uses log-space representatives, isotonic regression, plateau
+collapse, and PCHIP (shape-preserving piecewise cubic interpolation).
+The fixed calibration response can be prepared once and reused.
+Concentration adjustment after edge conversion is outside this diagram.
 
 ## Editing and exporting
 
-- Edit the text inside the Mermaid block above to change the Markdown diagram.
-  A Mermaid-enabled Markdown preview renders it; an ordinary text editor shows
-  its source. `-->` creates an arrow and `-.->` creates a dashed arrow.
-- `optical_workflow.dot` is the editable source for the accompanying rendered
-  figure. It uses Graphviz for more controlled placement. The Mermaid and DOT
-  versions are separate sources; editing one does not automatically edit the other.
-- Re-render the DOT source from this directory:
+Edit the `.dot` files to change the rendered figures. From `docs/figures`, run:
 
 ```sh
-dot -Tsvg optical_workflow.dot -o optical_workflow.svg
-dot -Tpng -Gdpi=180 optical_workflow.dot -o optical_workflow.png
+dot -Tsvg optical_lut_workflow.dot -o optical_lut_workflow.svg
+dot -Tsvg optical_conversion_workflow.dot -o optical_conversion_workflow.svg
 ```
 
-SVG is a vector image, so its lines and text remain sharp when resized. It can
-also be edited in a vector drawing application. Keep the source alongside it.
+The SVG files are vector artwork. For a PNG, replace `-Tsvg` with
+`-Tpng -Gdpi=180` and change the output extension to `.png`.
+The Mermaid blocks above are an alternative editable representation; they
+do not automatically update the DOT files or SVG artwork.
 
-## Suggested supplementary caption
+## Suggested supplementary captions
 
-Figure Sx. Main steps and function calls used to construct optical-response
-lookup tables (LUTs) and convert optical diameters. (a) Instrument geometry,
-laser polarization, and collection settings are read from a TOML configuration
-file. The model integrates polarized Mie scattering over the accepted solid
-angle and stores the resulting cross-sections on diameter and complex
-refractive-index grids, together with the optical configuration. (b) During
-diameter conversion, the stored responses are interpolated for the calibration
-and assumed particle refractive indices and made strictly monotone. Each input
-diameter is mapped to the diameter giving the same scattering cross-section
-for the assumed refractive index. The dashed connection denotes reuse of the
-saved LUT; optical integration is not repeated during diameter conversion.
+**LUT calculation.** Independent inputs and principal steps used to construct
+an optical-response lookup table. The instrument configuration is read from
+TOML; diameter and complex refractive-index sampling grids and the selected
+detector are supplied separately. Polarized Mie scattering is integrated over
+the accepted solid angle, and the resulting cross-sections are saved together
+with the optical configuration.
 
-## Scope notes
-
-The geometry cache is prepared by the LUT builder and passed to `setup_csca`;
-the cache itself does not call the integrator. The diagram shows this processing
-order, rather than claiming every consecutive box calls the next box.
-The fixed calibration response may be prepared once and reused. Concentration
-adjustment after edge conversion is outside this diagram. The routine conversion
-does not read today's TOML or rebuild Mie responses.
+**Optical diameter conversion.** Independent inputs and principal steps used
+to convert reported optical bin edges. Responses for the calibration and
+assumed particle refractive indices are obtained from the saved LUT and made
+strictly monotone. Each reported diameter is mapped to the diameter on the
+assumed-particle response giving the same scattering cross-section. The
+conversion uses the saved LUT without repeating the optical integration.

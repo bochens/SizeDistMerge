@@ -1,0 +1,26 @@
+// Render from docs/figures: dot -Tsvg optical_lut_workflow.dot -o optical_lut_workflow.svg
+digraph lut {
+  graph [rankdir=TB, bgcolor="white", pad="0.15", nodesep="0.3", ranksep="0.38", splines=ortho,
+         label="LUT calculation", labelloc=t, fontname="Helvetica-Bold", fontsize=17];
+  node [shape=box, style="rounded,filled", fillcolor="#f4f7fa", color="#a8b6c2", fontname="Helvetica", fontsize=12, margin="0.13,0.10"];
+  edge [color="#647581", arrowsize=0.7, penwidth=1.1];
+  toml [label="OPC geometry file\nTOML", fillcolor="#e5f0f4"];
+  load [label="load_optical_setup()\nRead and validate configuration"];
+  diameter [label="Diameter grid\nD (nm)", fillcolor="#e5f0f4"];
+  real [label="Real refractive-index grid\nn", fillcolor="#e5f0f4"];
+  imag [label="Imaginary refractive-index grid\nk", fillcolor="#e5f0f4"];
+  detector [label="Selected detector\nChannel name", fillcolor="#e5f0f4"];
+  build [label="build_setup_sigma_lut() → build_sigma_lut()\nPrepare the selected detector and sampling grids"];
+  cache [label="setup_geometry_cache()\nAccepted angles and polarization weights"];
+  pairs [label="For each n, k pair\nEvaluate the diameter grid"];
+  integration [label="setup_csca() → _collected_cross_section()\nCalculate the detector response"];
+  mie [label="mie.phase_matrix(norm=\"qsca\")\nP11 − P12 and P11 + P12"];
+  integral [label="Apply cached angular weights\nIntegrate with sin(θ) dθ; multiply by πr²"];
+  output [label="Saved LUT · Zarr\nσ(D, n, k) and optical metadata", fillcolor="#eaf1e8", penwidth=1.5];
+  toml -> load;
+  {rank=same; load; diameter; real; imag; detector;}
+  load -> build; diameter -> build; real -> build; imag -> build; detector -> build;
+  build -> cache; build -> pairs;
+  pairs -> integration -> mie -> integral -> output;
+  cache -> integral;
+}

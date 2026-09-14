@@ -1,0 +1,32 @@
+// Render from docs/figures: dot -Tsvg optical_conversion_workflow.dot -o optical_conversion_workflow.svg
+digraph conversion {
+  graph [rankdir=TB, bgcolor="white", pad="0.15", nodesep="0.4", ranksep="0.4", splines=ortho,
+         label="Optical diameter conversion", labelloc=t, fontname="Helvetica-Bold", fontsize=17];
+  node [shape=box, style="rounded,filled", fillcolor="#f4f7fa", color="#a8b6c2", fontname="Helvetica", fontsize=12, margin="0.13,0.10"];
+  edge [color="#647581", arrowsize=0.7, penwidth=1.1];
+  lut [label="Saved LUT\nZarr file", fillcolor="#e5f0f4"];
+  read [label="SigmaLUT(path)\nRead and validate table"];
+  source [label="Calibration refractive index\nm_src", fillcolor="#e5f0f4"];
+  target [label="Assumed particle refractive index\nm_dst", fillcolor="#e5f0f4"];
+  bins [label="Smoothing interval count\nresponse_bins", fillcolor="#e5f0f4"];
+  edges [label="Reported bin edges\nD_old (nm)", fillcolor="#e5f0f4"];
+  qsource [label="SigmaLUT.sigma_curve()\nCalibration response"];
+  qtarget [label="SigmaLUT.sigma_curve()\nAssumed-particle response"];
+  ssource [label="make_monotone_sigma_interpolator()\nSmooth calibration response"];
+  starget [label="make_monotone_sigma_interpolator()\nSmooth assumed-particle response"];
+  forward [label="f_sigma(D_old)\nFind the signal at each reported edge"];
+  inverse [label="g_diam(same signals)\nFind diameters on the assumed-particle curve"];
+  validate [label="Check finite, positive, strictly increasing edges"];
+  output [label="Converted bin edges\nD_new (nm)", fillcolor="#eaf1e8", penwidth=1.5];
+  lut -> read;
+  {rank=same; source; read; target;}
+  source -> qsource; read -> qsource;
+  target -> qtarget; read -> qtarget;
+  {rank=same; qsource; bins; qtarget;}
+  qsource -> ssource; qtarget -> starget;
+  bins -> ssource; bins -> starget;
+  {rank=same; ssource; starget;}
+  ssource -> forward; edges -> forward;
+  starget -> inverse; forward -> inverse;
+  inverse -> validate -> output;
+}

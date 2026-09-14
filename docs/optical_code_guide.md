@@ -2,15 +2,17 @@
 
 ## Workflow overview
 
-![LUT construction and optical diameter conversion](figures/optical_workflow.svg)
+The two diagrams separate lookup-table (LUT) calculation from later diameter
+conversion. Each independent input has its own box. Arrows show processing
+order or data dependencies, not an exhaustive list of direct function calls.
 
-The left column builds the lookup table (LUT); the right column uses that saved
-table to convert diameters. Arrows show processing order, not an exhaustive
-list of direct function calls. The dashed link shows reuse of the saved LUT.
+![LUT calculation](figures/optical_lut_workflow.svg)
 
-[Mermaid diagram, editing instructions, and caption](figures/optical_workflow.md) ·
-[Graphviz source for the rendered figure](figures/optical_workflow.dot) ·
-[SVG figure](figures/optical_workflow.svg)
+![Optical diameter conversion](figures/optical_conversion_workflow.svg)
+
+[Editable diagrams, instructions, and captions](figures/optical_workflow.md) ·
+[LUT diagram source](figures/optical_lut_workflow.dot) ·
+[Conversion diagram source](figures/optical_conversion_workflow.dot)
 
 ## Start with the calculation you need
 

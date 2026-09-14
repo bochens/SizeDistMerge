@@ -29,14 +29,16 @@ numba = ["numba"]
 
 [tool.setuptools]
 include-package-data = true
-packages = ["sizedistmerge", "sizedistmerge.lut"]
+packages = ["sizedistmerge", "sizedistmerge.lut", "sizedistmerge.opc_setups"]
 
 [tool.setuptools.package-dir]
 "sizedistmerge" = "src"
 "sizedistmerge.lut" = "lut"
+"sizedistmerge.opc_setups" = "opc_setups"
 
 [tool.setuptools.package-data]
 "sizedistmerge.lut" = ["*.zarr/**/*"]
+"sizedistmerge.opc_setups" = ["*.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

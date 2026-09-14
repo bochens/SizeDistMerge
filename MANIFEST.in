@@ -1,1 +1,2 @@
 recursive-include lut *
+recursive-include opc_setups *.toml

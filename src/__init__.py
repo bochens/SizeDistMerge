@@ -11,6 +11,7 @@ from importlib import import_module
 __version__ = "0.1.0"
 
 _MODULE_EXPORTS = {
+    "optical_lut": (),
     "uncertainty": (
         "UncertaintyUnavailable",
         "blocked_mean_factor",
@@ -55,6 +56,7 @@ _MODULE_EXPORTS = {
         "growth_factor_from_kappa",
     ),
     "optical_diameter": (
+        "load_optical_setup",
         "POPSGeom",
         "UHSASGeom",
         "PCASPGeom",

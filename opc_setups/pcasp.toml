@@ -1,0 +1,27 @@
+schema_version = 1
+name = "PCASP"
+reference = "Rosenberg et al. (2012), Table 1; doi:10.5194/amt-5-1147-2012"
+notes = "Nominal full-azimuth angular band, not a measured aperture transmission map. No gain or losses."
+wavelength_nm = 632.8
+angular_step_deg = 0.25
+aerosol_direction = [-1.0, 0.0, 0.0]
+
+# Equal outgoing/returning intensities, normalized to their total.
+[[beams]]
+direction = [0.0, 0.0, 1.0]
+polarization = [1.0, 0.0, 0.0]
+irradiance_fraction = 0.5
+[[beams]]
+direction = [0.0, 0.0, -1.0]
+polarization = [1.0, 0.0, 0.0]
+irradiance_fraction = 0.5
+
+# About z: accept 35--120 degrees over all azimuths, not a side-facing cone.
+[[channels]]
+name = "Collection"
+[[channels.collect]]
+axis = [0.0, 0.0, 1.0]
+half_angle_deg = 120.0
+[[channels.exclude]]
+axis = [0.0, 0.0, 1.0]
+half_angle_deg = 35.0

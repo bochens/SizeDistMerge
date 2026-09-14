@@ -1,0 +1,36 @@
+schema_version = 1
+name = "UHSAS"
+reference = "Howell et al. (2021), Fig. 1 and Appendix A"
+notes = "Opposing detectors remain separate. Each cross-section is normalized to total incident irradiance."
+wavelength_nm = 1054.0
+angular_step_deg = 0.25
+aerosol_direction = [-1.0, 0.0, 0.0]
+
+# Add beam intensities, not coherent electric fields. Fractions sum to one.
+[[beams]]
+direction = [0.0, 0.0, 1.0]
+polarization = [1.0, 0.0, 0.0]
+irradiance_fraction = 0.5
+[[beams]]
+direction = [0.0, 0.0, -1.0]
+polarization = [1.0, 0.0, 0.0]
+irradiance_fraction = 0.5
+
+# Each detector accepts an outer cone minus its central blocked cone.
+[[channels]]
+name = "Collection 1"
+[[channels.collect]]
+axis = [0.0, 1.0, 0.0]
+half_angle_deg = 57.0
+[[channels.exclude]]
+axis = [0.0, 1.0, 0.0]
+half_angle_deg = 14.8
+
+[[channels]]
+name = "Collection 2"
+[[channels.collect]]
+axis = [0.0, -1.0, 0.0]
+half_angle_deg = 57.0
+[[channels.exclude]]
+axis = [0.0, -1.0, 0.0]
+half_angle_deg = 14.8

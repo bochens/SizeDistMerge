@@ -1,0 +1,20 @@
+# Directions use [x, y, z]. Laser: z; electric field: x; collector: y.
+# theta is measured from the beam. phi runs from y toward x for this beam.
+schema_version = 1
+name = "POPS"
+reference = "Gao et al. (2016), Fig. 1; mirror-only model per Liu et al. (2021), Appendix A"
+notes = "Angular acceptance, not a physical mirror surface. No direct detector path or optical losses."
+wavelength_nm = 405.0
+angular_step_deg = 0.25
+aerosol_direction = [-1.0, 0.0, 0.0]
+
+[[beams]]
+direction = [0.0, 0.0, 1.0]
+polarization = [1.0, 0.0, 0.0]
+irradiance_fraction = 1.0
+
+[[channels]]
+name = "Collection"
+[[channels.collect]]
+axis = [0.0, 1.0, 0.0]
+half_angle_deg = 52.0  # Angle from collection axis to rim, not from laser.

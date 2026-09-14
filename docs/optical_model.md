@@ -9,6 +9,9 @@ indices and merged distributions have not yet been established.
 
 ## What is calculated
 
+For the code layout, editable OPC settings, and the two calculation paths,
+see [Reading and configuring the optical code](optical_code_guide.md).
+
 `pops_csca` and `uhsas_csca` return collected scattering cross-section in square
 micrometers, for a homogeneous sphere in air. They do not include laser power,
 mirror reflectivity, detector gain, particle-position variability, or

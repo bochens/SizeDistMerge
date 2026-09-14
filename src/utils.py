@@ -33,7 +33,11 @@ def _validate_spectrum_lengths(edges_nm: np.ndarray, dndlogdp: np.ndarray) -> No
 
 
 def edges_from_mids_geometric(bin_mid_nm: np.ndarray) -> np.ndarray:
-    """Infer geometric bin edges from bin midpoints."""
+    """Estimate edges halfway between adjacent midpoints in log diameter.
+
+    The first and last edges use the nearest midpoint spacing. These are
+    inferred edges; use the instrument's reported edges when available.
+    """
     c = _validate_positive_increasing("bin_mid_nm", bin_mid_nm, min_size=2)
     if c.size < 2:
         return np.asarray([], dtype=float)
@@ -61,7 +65,10 @@ def delta_log10_from_edges(edges_nm: np.ndarray) -> np.ndarray:
 
 
 def dsdlog_from_dndlog(bin_mid_nm: np.ndarray, arr: np.ndarray) -> np.ndarray:
-    """Convert ``dN/dlogDp`` to ``dS/dlogDp`` using diameter in micrometers."""
+    """Multiply the number spectrum by each sphere's surface area.
+
+    Input diameters are in nm; output area is in um^2 per concentration unit.
+    """
     D_um = _as_1d_float("bin_mid_nm", bin_mid_nm) * 1e-3
     values = _as_1d_float("arr", arr, allow_nan=True)
     if values.size != D_um.size:
@@ -70,7 +77,10 @@ def dsdlog_from_dndlog(bin_mid_nm: np.ndarray, arr: np.ndarray) -> np.ndarray:
 
 
 def dvdlog_from_dndlog(bin_mid_nm: np.ndarray, arr: np.ndarray) -> np.ndarray:
-    """Convert ``dN/dlogDp`` to ``dV/dlogDp`` using diameter in micrometers."""
+    """Multiply the number spectrum by each sphere's volume.
+
+    Input diameters are in nm; output volume is in um^3 per concentration unit.
+    """
     D_um = _as_1d_float("bin_mid_nm", bin_mid_nm) * 1e-3
     values = _as_1d_float("arr", arr, allow_nan=True)
     if values.size != D_um.size:
@@ -84,7 +94,12 @@ def counts_from_dndlog(
     bin_mid_nm: Optional[np.ndarray] = None,
     edges_nm: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Convert ``dN/dlogDp`` to per-bin counts."""
+    """Multiply each spectrum height by its log10 bin width.
+
+    For a concentration spectrum, the result is bin number concentration
+    (for example cm^-3), not the number of particles detected. The historical
+    function name does not imply a sampled-air-volume or counting correction.
+    """
     if edges_nm is None and bin_mid_nm is None:
         return np.asarray([], dtype=float)
     e = edges_nm if edges_nm is not None else edges_from_mids_geometric(bin_mid_nm)
@@ -96,7 +111,11 @@ def counts_from_dndlog(
 
 
 def dndlog_from_counts(counts: np.ndarray, *, edges_nm: np.ndarray) -> np.ndarray:
-    """Convert per-bin counts to ``dN/dlogDp``."""
+    """Divide bin number concentrations by their log10 diameter widths.
+
+    ``counts`` must already use the desired concentration units; this does
+    not convert raw detector counts into concentrations.
+    """
     dlog = delta_log10_from_edges(edges_nm)
     if dlog.size == 0:
         return np.asarray([], dtype=float)
@@ -107,7 +126,12 @@ def dndlog_from_counts(counts: np.ndarray, *, edges_nm: np.ndarray) -> np.ndarra
 
 
 def remap_dndlog_by_edges(old_edges_nm, new_edges_nm, dndlogdp):
-    """Remap onto same-length edge arrays while conserving counts in each bin."""
+    """Move bin edges without changing the number concentration in each bin.
+
+    Bin i remains bin i. If its log-diameter width doubles, its reported
+    height halves. This changes the diameter coordinate; it does not split
+    particles among a new set of bins or recover their positions within a bin.
+    """
     old_edges_nm = _validate_positive_increasing("old_edges_nm", old_edges_nm, min_size=2)
     new_edges_nm = _validate_positive_increasing("new_edges_nm", new_edges_nm, min_size=2)
     dndlogdp = _as_1d_float("dndlogdp", dndlogdp, allow_nan=True)
@@ -121,7 +145,12 @@ def remap_dndlog_by_edges(old_edges_nm, new_edges_nm, dndlogdp):
 
 
 def rebin_dndlog_by_edges_overlap(old_edges_nm, new_edges_nm, dndlogdp, *, min_coverage=0.999):
-    """Rebin by log-space bin overlap, conserving counts where bins overlap."""
+    """Redistribute bin number concentrations onto a different set of edges.
+
+    Assume constant dN/dlog10D within each old bin. Each new bin receives
+    the fraction of that concentration covered by its log-diameter overlap.
+    Unlike edge conversion, one old bin can contribute to several new bins.
+    """
     old_edges_nm = _validate_positive_increasing("old_edges_nm", old_edges_nm, min_size=2)
     new_edges_nm = _validate_positive_increasing("new_edges_nm", new_edges_nm, min_size=2)
     dndlogdp = _as_1d_float("dndlogdp", dndlogdp, allow_nan=True)
@@ -170,6 +199,8 @@ def rebin_dndlog_by_edges_overlap(old_edges_nm, new_edges_nm, dndlogdp, *, min_c
                 break
 
     dlog_new = np.diff(np.log10(new_edges_nm))
+    # Divide by the full new-bin width, not just its covered portion.
+    # The coverage check below hides bins with too much unmeasured width.
     dndlogdp_new = counts_new / dlog_new
 
     coverage_frac = covered_logw / dlog_new
@@ -182,7 +213,11 @@ remap_dndlog_by_edges_any = rebin_dndlog_by_edges_overlap
 
 
 def select_between(m, e, y, s=None, xmin=None, xmax=None):
-    """Select bins whose full edge interval is within ``xmin`` and ``xmax``."""
+    """Keep whole bins inside the requested diameter limits; never cut a bin.
+
+    ``m`` and ``e`` are midpoints and edges; ``y`` is the spectrum and ``s``
+    is optional uncertainty. All returned arrays describe the same bins.
+    """
     m = _as_1d_float("m", m)
     e = _validate_positive_increasing("e", e, min_size=2)
     y = _as_1d_float("y", y, allow_nan=True)

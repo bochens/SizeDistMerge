@@ -15,7 +15,7 @@ def _get_kwargs_for(label, user_dict, fallback: dict):
             out.update(user_dict[label])
     return out
 
-# --- NEW: metric → ylabel mapper ---
+# Labels only: the caller must already have converted number to area or volume.
 def _moment_ylabel(moment: str) -> str:
     # Accept either symbols or indices
     m = str(moment).upper()
@@ -68,7 +68,7 @@ def plot_size_distributions(
     legend_order: list[str] | None = None,
     moment: str | None = None,          # optional: choose ylabel via moment ("N","S","V")
     ylabel: str | None = None,          # overrides moment if provided
-    # NEW: optionally reuse existing figure/axes (ax required if fig is given)
+    # Supply ax to draw inside an existing figure.
     fig: plt.Figure | None = None,
     ax: plt.Axes | None = None,
     axf: plt.Axes | None = None,
@@ -76,6 +76,9 @@ def plot_size_distributions(
 ):
     """
     Plot mean ±1σ size distributions as regular lines.
+    ``sigma`` must be an absolute uncertainty in the same units as the values,
+    not a relative or log uncertainty. This function only draws the supplied
+    values +/- sigma; it does not estimate uncertainty or convert log bounds.
     If `fig`/`ax` are provided, the plot draws onto them (and `axf` for the flag strip).
     If `show_flag_strip=True` but `axf` is None while `ax` is provided, the flag strip
     is disabled for this call (so we don't create extra axes unexpectedly).
@@ -198,7 +201,7 @@ def plot_size_distributions_steps(
     legend_order: list[str] | None = None,
     moment: str | None = None,          # choose ylabel via moment ("N","S","V")
     ylabel: str | None = None,          # overrides moment if provided
-    # NEW: optionally reuse existing figure/axes
+    # Supply ax to draw inside an existing figure.
     fig: plt.Figure | None = None,
     ax: plt.Axes | None = None,
     axf: plt.Axes | None = None,
@@ -206,6 +209,8 @@ def plot_size_distributions_steps(
 ):
     """
     Plot mean ±1σ size distributions as step histograms with edge-aligned uncertainty.
+    ``sigma`` is an absolute uncertainty, in the same units as the heights.
+    Convert relative or log uncertainties before using this symmetric band.
     If `fig`/`ax` are provided, draw onto them (and `axf` for the flag strip).
     """
     import matplotlib.dates as mdates
@@ -271,6 +276,8 @@ def plot_size_distributions_steps(
         if fk is not False and sigma is not None:
             ylo = vals - sigma
             yhi = vals + sigma
+            # There is one more edge than bin. Repeat the last bound so the
+            # shaded step covers the last bin all the way to its right edge.
             ylo_e = np.r_[ylo, ylo[-1]]
             yhi_e = np.r_[yhi, yhi[-1]]
 

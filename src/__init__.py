@@ -11,6 +11,12 @@ from importlib import import_module
 __version__ = "0.1.0"
 
 _MODULE_EXPORTS = {
+    "uncertainty": (
+        "UncertaintyUnavailable",
+        "blocked_mean_factor",
+        "bin_total_log_sensitivity",
+        "concentration_uncertainty",
+    ),
     "utils": (
         "edges_from_mids_geometric",
         "mids_from_edges",
@@ -90,8 +96,12 @@ _MODULE_EXPORTS = {
         "sigma_from_bands",
         "fractional_sigma",
         "compute_data_weights",
+        "smooth_weight_profile",
         "merge_sizedists_tikhonov",
         "merge_sizedists_tikhonov_consensus",
+        "bin_overlap_matrix",
+        "merge_sizedists_bin_totals",
+        "native_bin_consensus_multipliers",
     ),
     "ict_utils": (
         "read_ict",
@@ -147,6 +157,9 @@ __all__ = sorted(
 
 
 def __getattr__(name: str):
+    # Load a module only when its functions are requested. Reading an ICT
+    # file, for example, should not require loading the Mie calculation tools.
+    # Save the result in globals so later requests reuse the same object.
     if name in _SUBMODULES:
         module = import_module(f".{name}", __name__)
         globals()[name] = module

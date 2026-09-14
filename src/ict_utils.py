@@ -83,7 +83,7 @@ def _instrument_from_filename(name: str) -> Optional[str]:
     - Takes the token before the first '_' (e.g. 'ARCSIX-LARGE-APS' or 'PUTLS-UHSAS')
     - Returns the part after the first '-' if present, else the token itself
       -> 'ARCSIX-LARGE-APS' -> 'LARGE-APS'
-      -> 'PUTLS-UHSAS'      -> 'PUTLS-UHSAS'
+      -> 'ARCSIX-PUTLS-UHSAS' -> 'PUTLS-UHSAS'
       -> 'FIMS'             -> 'FIMS'
     """
     head = name.split("_", 1)[0]
@@ -234,6 +234,9 @@ def _attach_time(df: pd.DataFrame, meas_date: Optional[datetime]) -> pd.DataFram
         warnings.warn("No measurement date found; keeping numeric time column.", RuntimeWarning)
         return df
 
+    # Treat each backwards jump in seconds-of-day as a midnight crossing.
+    # This assumes rows are in acquisition order; it does not distinguish
+    # a clock reset or an out-of-order row from a new day.
     rolls = np.r_[0, (np.diff(secs) < 0).astype(int)].cumsum()
     times = [meas_date + timedelta(days=int(rolls[i]), seconds=float(secs[i])) for i in range(secs.size)]
     df.insert(0, "time", pd.to_datetime(times))
@@ -311,6 +314,23 @@ def _extract_bin_meta_from_header(lines: List[str], instrument_hint: Optional[st
     meta: Dict[str, List[float]] = {}
     n = len(lines)
     low = lambda s: s.lower()
+
+    # -------- Merged size-distribution products --------
+    # ARCSIX-MERGED-SIZEDIST files store generic DNLOG_### columns and keep the
+    # bin grid in normal comments as FINE_EDGES_NM/FINE_CENTERS_NM.
+    for s in lines:
+        stripped = s.strip()
+        upper = stripped.upper()
+        if upper.startswith("FINE_EDGES_NM:"):
+            edges = _parse_num_list(stripped.split(":", 1)[1])
+            if len(edges) >= 2:
+                meta["lower_nm"] = edges[:-1]
+                meta["upper_nm"] = edges[1:]
+                meta.setdefault("mid_nm", [float(np.sqrt(a * b)) for a, b in zip(edges[:-1], edges[1:])])
+        elif upper.startswith("FINE_CENTERS_NM:"):
+            centers = _parse_num_list(stripped.split(":", 1)[1])
+            if centers:
+                meta["mid_nm"] = centers
 
     # -------- FIMS --------
     if instrument_hint in (None, "FIMS") or not meta:
@@ -521,7 +541,8 @@ def read_ict_file(
     df = _attach_time(_read_table_with_header(lines), meas_date)
     df.attrs["instrument"] = instr_key
 
-    # Time subsetting
+    # Two distinct bounds select [start, end). One bound (or equal bounds)
+    # selects a whole day, unless it includes a time: then keep the nearest row.
     t0 = parse_bound(start, tz); t1 = parse_bound(end, tz)
     single_day = ((start is None) != (end is None)) or (t0 is not None and t1 is not None and t0 == t1)
     if "time" in df.columns:
@@ -798,6 +819,17 @@ def _detect_bin_columns_any(df: pd.DataFrame):
         plain_bincols.sort(key=lambda t: t[0])
         return "bin", [c for _, c in plain_bincols], None
 
+    # Merged ARCSIX product: DNLOG_001, DNLOG_002, ...
+    dnlog_cols: List[Tuple[int, str]] = []
+    dnlog_pat = re.compile(r'^DNLOG_(\d+)$', re.IGNORECASE)
+    for col in cols:
+        match_obj = dnlog_pat.match(col)
+        if match_obj:
+            dnlog_cols.append((int(match_obj.group(1)), col))
+    if dnlog_cols:
+        dnlog_cols.sort(key=lambda t: t[0])
+        return "dnlog", [c for _, c in dnlog_cols], None
+
     # APS/POPS/UHSAS style: *_BinNN
     bincols: List[Tuple[int, str]] = []
     pat = re.compile(r'^(?P<prefix>[A-Za-z0-9]+)[_\-]?[Bb]in_?(\d+)$', re.IGNORECASE)
@@ -836,8 +868,10 @@ def label_size_bins(
     require_monotonic: bool = True,
 ) -> pd.DataFrame:
     """
-    Relabel bin columns to <col_prefix>_d<middle>nm using the exact mids from header
-    (no rounding). Works for APS/POPS/UHSAS/FIMS styles and already-renamed columns.
+    Relabel bin columns to <col_prefix>_d<middle>nm using header midpoints.
+    Names retain up to 12 decimal places. This changes labels only: it does
+    not convert optical or aerodynamic diameters, or change concentrations.
+    Works for APS/POPS/UHSAS/FIMS styles and already-renamed columns.
     """
     if df is None or df.empty:
         return pd.DataFrame(index=df.index if df is not None else None)
@@ -912,6 +946,9 @@ def _rename_nmass_channels(df: pd.DataFrame, cuts_nm: List[float]) -> pd.DataFra
     """
     Rename CNch1..N -> NMASS_gt<cut>nm using ascending cut sizes (no rounding).
     Only applied if channel count equals len(cuts_nm).
+
+    These names identify channels, not differential size bins. Renaming
+    does not apply a counting-efficiency curve or invert the NMASS response.
     """
     pat = re.compile(r'^CNch(\d+)$', re.IGNORECASE)
     chans: List[Tuple[str, int]] = []
@@ -939,14 +976,14 @@ def read_aps(path_or_dir: PathLike, **kwargs) -> pd.DataFrame:
     return read_ict(path_or_dir, **kwargs)
 
 def read_pops(path_or_dir: PathLike, **kwargs) -> pd.DataFrame:
-    """POPS (optical PSL). Returns labeled size bins by default."""
+    """Read POPS bins as reported; labeling does not apply an RI correction."""
     kwargs.setdefault("instrument", "PUTLS-POPS")
     kwargs.setdefault("standardize_bins", True)
     kwargs.setdefault("col_prefix", "dNdlogDp")
     return read_ict(path_or_dir, **kwargs)
 
 def read_uhsas(path_or_dir: PathLike, **kwargs) -> pd.DataFrame:
-    """UHSAS ((NH4)2SO4). Returns labeled size bins by default."""
+    """Read UHSAS bins as reported; calibration must be checked for the dataset."""
     kwargs.setdefault("instrument", "PUTLS-UHSAS")
     kwargs.setdefault("standardize_bins", True)
     kwargs.setdefault("col_prefix", "dNdlogDp")
@@ -983,7 +1020,9 @@ def number_to_surface_area_spectrum(mids_nm, dNdlogDp, frac_sigma, unit="um"):
     """
     Convert number spectrum (dN/dlogDp in # cm^-3, D in nm) to surface-area spectrum.
     unit: 'nm' -> nm^2 cm^-3, 'um' -> µm^2 cm^-3, 'm' -> m^2 cm^-3
-    Returns: D_out (same unit as chosen for labeling), SA, SA_lo, SA_hi
+    Returns: D_out (chosen diameter unit), SA, SA_lo, SA_hi, y_axis_unit_label.
+    ``frac_sigma`` is supplied by the caller (0.2 means 20%). The bounds are
+    SA * (1 +/- frac_sigma); this function does not estimate uncertainty.
     """
     D_nm = np.asarray(mids_nm, float)
     y    = np.asarray(dNdlogDp, float)
@@ -1029,10 +1068,13 @@ def mean_spectrum(
     ddof: int = 1,  # sample std by default
 ):
     """
-    Arithmetic time-mean and 1σ (std) for bin-labeled columns like
+    Arithmetic time-mean and temporal standard deviation for columns like
     "<prefix>_d<mid>nm" (e.g., dNdlogDp_d150nm).
 
-    Returns: (mids_nm, mean_vals, sigma_vals, label) sorted by mids.
+    ``sigma_vals`` describes spread among the rows, not uncertainty of the
+    mean. No correction for sample count or time correlation is applied.
+    Returns: (mids_nm, mean_vals, sigma_vals, label, n_vals) sorted by mids,
+    where n_vals is the number of nonmissing samples in each bin.
     If no matching columns (or df empty), returns None.
     """
     if df is None or df.empty:
@@ -1147,7 +1189,11 @@ def align_to_common_grid(
     protect_flag_cols: bool = True,           # never interpolate columns that look like flags/QC
 ) -> Tuple[Dict[str, pd.DataFrame], pd.DatetimeIndex]:
     """
-    Align (and optionally interpolate) frames onto a common time grid.
+    Put instrument tables on the same timestamps, optionally filling gaps.
+
+    This is time alignment, not diameter alignment. Interpolated rows are
+    estimates, not new independent measurements; do not count them as extra
+    samples when estimating uncertainty from temporal variability.
     """
     if not frames:
         raise ValueError("No frames provided.")
@@ -1211,7 +1257,8 @@ def align_to_common_grid(
     for k, df in norm.items():
         out = df.reindex(grid)
 
-        # Choose columns to interpolate (numeric), but avoid flag-like fields
+        # Flags are categories: a value halfway between two flags has no
+        # physical meaning. Exclude flag/QC columns from numeric interpolation.
         num_cols = out.select_dtypes(include=[np.number]).columns.tolist()
         if protect_flag_cols and num_cols:
             flag_like = [c for c in num_cols if re.search(r"(flag|qc)", c, flags=re.I)]
@@ -1226,6 +1273,8 @@ def align_to_common_grid(
             )
 
         if non_numeric_fill in {"ffill", "bfill"}:
+            # Despite the option's name, this fills the whole table, including
+            # numeric and flag columns, using the previous or next valid value.
             out = getattr(out, non_numeric_fill)()
 
         aligned[k] = out
@@ -1244,6 +1293,9 @@ def filter_by_spectra_presence(
     Keep only timestamps where at least `min_instruments` *spectral* instruments have any
     finite size-bin value from get_spectra(..., long=False). Non-spectral frames (e.g., CPC)
     are ignored when computing the keep mask but are still filtered to the kept times.
+
+    This checks data presence, not agreement or measurement quality. Pass
+    instrument quality-control masks through extra_masks when needed.
     """
     if not frames:
         raise ValueError("No frames provided.")
@@ -1320,7 +1372,8 @@ def find_flag_column(df: pd.DataFrame) -> Optional[str]:
 def flag_segments(series: pd.Series):
     """
     Given a time-indexed flag series, return a list of (t0, t1, value) segments
-    where the flag is constant over [t0, t1].
+    where the retained samples have the same flag. Missing samples are dropped;
+    gaps alone do not start a new segment. Endpoints are sample timestamps.
 
     Requires DatetimeIndex; raises if not.
     """

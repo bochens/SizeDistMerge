@@ -66,13 +66,17 @@ class CollectionCone:
         the exact same boundary used by ``contains`` and by the integrator.
         """
         axis = np.asarray(self.axis)
+        # Choose a direction clearly different from the cone axis, then remove
+        # its component along that axis. This gives a stable starting direction
+        # for drawing the rim, even when the cone points along x, y or z.
         seed = np.eye(3)[np.argmin(np.abs(axis))]
-        u = seed - np.dot(seed, axis)*axis
-        u /= np.linalg.norm(u)
-        v = np.cross(axis, u)
+        transverse_basis = seed - np.dot(seed, axis)*axis
+        transverse_basis /= np.linalg.norm(transverse_basis)
+        azimuth_basis = np.cross(axis, transverse_basis)
         angle, phi = np.broadcast_arrays(angle_rad, azimuth_rad)
         return (np.cos(angle)[..., None]*axis + np.sin(angle)[..., None]
-                * (np.cos(phi)[..., None]*u + np.sin(phi)[..., None]*v))
+                * (np.cos(phi)[..., None]*transverse_basis
+                   + np.sin(phi)[..., None]*azimuth_basis))
 
     def boundary(self, azimuth_rad):
         return self.directions(np.deg2rad(self.half_angle_deg), azimuth_rad)
@@ -80,7 +84,11 @@ class CollectionCone:
 
 @dataclass(frozen=True)
 class CollectionChannel:
-    """One detector output: union(collect) minus union(exclude), without gain."""
+    """One detector's accepted directions, without detector amplification.
+
+    A ray is accepted if it lies in any collection cone and no exclusion cone.
+    Overlapping collection cones do not count the same ray twice.
+    """
     name: str
     collect: tuple[CollectionCone, ...]
     exclude: tuple[CollectionCone, ...] = ()
@@ -90,11 +98,11 @@ class CollectionChannel:
         object.__setattr__(self, "exclude", tuple(self.exclude))
         if not self.name or not self.collect:
             raise ValueError("a channel needs a name and at least one collection cone")
-        if not all(isinstance(c, CollectionCone) for c in self.collect + self.exclude):
+        if not all(isinstance(cone, CollectionCone) for cone in self.collect + self.exclude):
             raise TypeError("collect and exclude must contain CollectionCone objects")
 
     def accepts(self, directions):
-        mask = np.logical_or.reduce([c.contains(directions) for c in self.collect])
+        mask = np.logical_or.reduce([cone.contains(directions) for cone in self.collect])
         for cone in self.exclude:
             mask &= ~cone.contains(directions)
         return mask
@@ -121,6 +129,8 @@ class IncidentBeam:
 
     @property
     def transverse(self):
+        # With beam=z and E=x this is y. Thus phi=0 is y, increasing toward x;
+        # this is intentionally not the usual azimuth measured from x toward y.
         return np.cross(self.direction, self.polarization)
 
 
@@ -148,9 +158,9 @@ class OpticalSetup:
             raise ValueError("angular_step_deg must be finite and positive")
         if not self.beams or not self.channels:
             raise ValueError("a setup needs at least one beam and one channel")
-        if not np.isclose(sum(b.irradiance_fraction for b in self.beams), 1., rtol=0, atol=1e-12):
+        if not np.isclose(sum(beam.irradiance_fraction for beam in self.beams), 1., rtol=0, atol=1e-12):
             raise ValueError("beam irradiance fractions must sum to 1")
-        names = [c.name for c in self.channels]
+        names = [channel.name for channel in self.channels]
         if len(set(names)) != len(names):
             raise ValueError("channel names must be unique")
 
@@ -160,11 +170,14 @@ class OpticalSetup:
 
     @classmethod
     def from_dict(cls, data):
+        # Rebuild the beams and cones from saved LUT metadata. Their constructors
+        # also check the directions and angle limits, just as for a new setup.
         data = dict(data)
-        data['beams'] = tuple(IncidentBeam(**b) for b in data['beams'])
+        data['beams'] = tuple(IncidentBeam(**beam) for beam in data['beams'])
         data['channels'] = tuple(CollectionChannel(
-            c['name'], tuple(CollectionCone(**v) for v in c['collect']),
-            tuple(CollectionCone(**v) for v in c.get('exclude', ()))) for c in data['channels'])
+            channel['name'], tuple(CollectionCone(**cone) for cone in channel['collect']),
+            tuple(CollectionCone(**cone) for cone in channel.get('exclude', ())))
+            for channel in data['channels'])
         return cls(**data)
 
 
@@ -183,27 +196,35 @@ def _merge_intervals(intervals):
 def _cap_intervals(theta, beam, cone):
     """Exact accepted azimuth intervals at one scattering angle theta.
 
-    Outgoing direction = k*cos(theta) + sin(theta)*(u*cos(phi)+E*sin(phi)),
-    with u=k cross E. Dotting with the cone axis gives A*cos(phi-delta)>=B.
+    At a fixed angle from the beam, rotating a ray traces a circle. Find the
+    portions of that circle inside the cone. Returned endpoints are radians.
+    In the formula below, k is the beam direction, E its polarization, and
+    u=k cross E: ray = k*cos(theta) + sin(theta)*(u*cos(phi)+E*sin(phi)).
     """
     axis = np.asarray(cone.axis)
     if cone.half_angle_deg == 0:
         return []
     if cone.half_angle_deg == 180:
         return [(0., 2*np.pi)]
-    a, b = np.dot(axis, beam.transverse), np.dot(axis, beam.polarization)
-    amplitude = np.sin(theta)*np.hypot(a, b)
+    # At fixed theta, the scattered ray traces a circle about the beam.
+    # The cone condition becomes amplitude*cos(phi-center) >= threshold.
+    transverse_projection = np.dot(axis, beam.transverse)
+    polarization_projection = np.dot(axis, beam.polarization)
+    amplitude = np.sin(theta)*np.hypot(transverse_projection, polarization_projection)
     threshold = np.cos(np.deg2rad(cone.half_angle_deg)) - np.cos(theta)*np.dot(axis, beam.direction)
     if amplitude < 1e-15:
+        # At a pole, or for a beam-centred cone, azimuth cannot change membership.
         return [(0., 2*np.pi)] if threshold <= 0 else []
-    q = threshold/amplitude
-    if q >= 1:
+    threshold_ratio = threshold/amplitude
+    if threshold_ratio >= 1:
         return []
-    if q <= -1:
+    if threshold_ratio <= -1:
         return [(0., 2*np.pi)]
-    center = np.arctan2(b, a) % (2*np.pi)
-    halfwidth = np.arccos(q)
+    center = np.arctan2(polarization_projection, transverse_projection) % (2*np.pi)
+    halfwidth = np.arccos(threshold_ratio)
     lo, hi = center-halfwidth, center+halfwidth
+    # An opening that crosses phi=0 is two intervals in [0, 2*pi], not a
+    # negative-width interval. Resolve this before unions and exclusions.
     if lo < 0:
         return [(0., hi), (lo+2*np.pi, 2*np.pi)]
     if hi > 2*np.pi:
@@ -221,8 +242,8 @@ def channel_azimuth_weights(theta_rad, beam, channel):
     theta = np.asarray(theta_rad, dtype=float)
     weights = np.zeros((3, theta.size))
     for i, angle in enumerate(theta.ravel()):
-        intervals = _merge_intervals([p for c in channel.collect for p in _cap_intervals(angle, beam, c)])
-        excluded = _merge_intervals([p for c in channel.exclude for p in _cap_intervals(angle, beam, c)])
+        intervals = _merge_intervals([interval for cone in channel.collect for interval in _cap_intervals(angle, beam, cone)])
+        excluded = _merge_intervals([interval for cone in channel.exclude for interval in _cap_intervals(angle, beam, cone)])
         for cut_lo, cut_hi in excluded:
             pieces = []
             for lo, hi in intervals:
@@ -236,6 +257,9 @@ def channel_azimuth_weights(theta_rad, beam, channel):
             intervals = pieces
         for lo, hi in intervals:
             width = hi-lo
+            # Integral cos(phi)^2 dphi = phi/2 + sin(2*phi)/4.
+            # The sine-squared integral is the remaining width, so the two
+            # polarization weights add back to the accepted azimuthal width.
             cosine = width/2 + (np.sin(2*hi)-np.sin(2*lo))/4
             weights[:, i] += width, cosine, width-cosine
-    return tuple(np.maximum(v.reshape(theta.shape), 0.) for v in weights)
+    return tuple(np.maximum(weight.reshape(theta.shape), 0.) for weight in weights)

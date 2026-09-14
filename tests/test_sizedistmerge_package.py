@@ -336,6 +336,39 @@ def test_ict_time_helpers_strip_timezone_without_clock_shift():
     assert aligned["x"].index.tz is None
 
 
+def test_ict_reader_labels_merged_dnlog_bins_from_fine_edges(tmp_path):
+    sys.path.insert(0, str(SRC))
+    import numpy as np
+    from sizedistmerge.ict_utils import get_spectra, read_ict_file
+
+    ict_path = tmp_path / "ARCSIX-MERGED-SIZEDIST-1min_P3B_20240610_R1.ict"
+    ict_path.write_text(
+        "\n".join(
+            [
+                "7, 1001, V02_2016",
+                "Perkins, Russell",
+                "Colorado State University",
+                "2024, 06, 10, 2026, 08, 27",
+                "FINE_EDGES_NM: 10, 20, 40",
+                "FINE_CENTERS_NM: 14.1421356237, 28.2842712475",
+                (
+                    "Time_Start, Time_Stop, Time_Mid, retrieved_aps_density, "
+                    "reference_source_flag, DNLOG_001, DNLOG_002"
+                ),
+                "0, 59, 29.5, 1200, 0, 10, 20",
+            ]
+        )
+    )
+
+    df = read_ict_file(ict_path, keep_time_col=True)
+    assert df.attrs["bin_meta"]["lower_nm"] == [10.0, 20.0]
+    assert df.attrs["bin_meta"]["upper_nm"] == [20.0, 40.0]
+
+    mids, spectra = get_spectra(df, col_prefix="dNdlogDp")
+    np.testing.assert_allclose(mids, [14.1421356237, 28.2842712475])
+    np.testing.assert_allclose(spectra.to_numpy(), [[10.0, 20.0]])
+
+
 def test_temporal_penalty_and_no_overlap_are_explicit():
     sys.path.insert(0, str(SRC))
     from sizedistmerge import alignment as al
@@ -642,7 +675,7 @@ def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
     assert captured["tol"] == 1e-5
     assert captured["popsize"] == 7
     assert captured["polish"] is False
-    assert captured["ri_srcs"] == [mp.RI_UHSAS_SRC, mp.RI_UHSAS_SRC]
+    assert captured["ri_srcs"] == [mp.RI_UHSAS_SRC, mp.RI_POPS_SRC]
     assert opt_res["n_fit"] == 1.45
     assert opt_res["n_pops_fit"] == 1.55
     assert opt_res["rho_fit"] == 1200.0
@@ -763,13 +796,13 @@ def test_run_joint_optimization_can_override_pops_ri_source(monkeypatch):
         specs,
         {},
         {},
-        pops_ri_src=mp.RI_POPS_SRC,
+        pops_ri_src=mp.RI_UHSAS_SRC,  # Explicit legacy replay, not the corrected default.
         fims_xmax=500,
     )
 
-    assert captured["opt_ri_src"] == mp.RI_POPS_SRC
-    assert captured["ri_srcs"] == [mp.RI_POPS_SRC]
-    assert opt_res["pops_ri_src"] == mp.RI_POPS_SRC
+    assert captured["opt_ri_src"] == mp.RI_UHSAS_SRC
+    assert captured["ri_srcs"] == [mp.RI_UHSAS_SRC]
+    assert opt_res["pops_ri_src"] == mp.RI_UHSAS_SRC
 
 
 def test_arcsix_instrument_selection_is_configurable():

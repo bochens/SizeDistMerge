@@ -120,6 +120,35 @@ still accepted by the instrument wrappers; new code can use
 resolution, normalization and optical-model version are unchanged by this
 refactor, so this change alone does not require rebuilding LUTs.
 
+## Experimental LAS 3340-family option
+
+`las_uhsas_proxy_setup(polarization=...)` provides a **test hypothesis**, not
+a verified LAS aperture. It uses the UHSAS circular annular openings at the
+LAS wavelength of 633 nm. The required polarization choice is `unpolarized`,
+`perpendicular`, or `parallel` (relative to the central beam/collector plane).
+Unpolarized illumination is represented by equal incoherent orthogonal
+components, and the two detector channels remain separate. Use the generic
+`setup_csca` and `build_setup_sigma_lut` functions with this setup.
+
+The TSI 3340 manual, chapter 5, confirms opposing side collectors, a 633 nm
+cavity, and separate detector gain ranges, but does not give the aperture
+dimensions used here. Moore et al. (2021), section 2.2, borrow UHSAS angular
+limits for their LAS theory. Their angle-only approximation is **not** an
+independent verification of our 3-D circular cones. Their laboratory data
+are for LAS 3340A, not a verification that 3340 and 3340A optics are identical.
+The unpolarized-laser patent listed in the manual is a motivation for a
+sensitivity case, not proof of the instrument's delivered polarization.
+
+`local/notebooks/las3340_optical_model.ipynb` (not distributed) compares all three polarization cases
+against Moore's original supplementary PSL diameter measurements, checks
+angular refinement, and builds a small experimental table under
+`outputs/las3340_proxy/`. It does not install a production LUT, assume a
+universal calibration refractive index, or change existing instruments.
+
+- [TSI 3340 manual](https://www.kenelec.com.au/wp-content/uploads/2016/06/TSI_3340_Manual.pdf)
+- [Moore et al. (2021)](https://doi.org/10.5194/amt-14-4517-2021)
+- [Patent US7079243B2](https://patents.google.com/patent/US7079243B2/en)
+
 ## Diameter conversion
 
 The response curve is still grouped in log diameter and fitted to increase

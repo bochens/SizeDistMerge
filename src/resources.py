@@ -53,7 +53,8 @@ def lut_path(kind: str) -> Path:
     if (Path(__file__).resolve().parents[1] / "pyproject.toml").is_file() and source_tree.is_dir():
         return source_tree
 
-    # setuptools packages that same directory as sizedistmerge.lut at install time.
+    # An installed copy may not have a repository beside it. Look for the
+    # same LUT files included with the package, not a second research-data folder.
     try:
         packaged = resources.files("sizedistmerge.lut").joinpath(name)
     except ModuleNotFoundError:

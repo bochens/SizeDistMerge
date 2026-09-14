@@ -266,6 +266,36 @@ def pcasp_optical_setup(geom: PCASPGeom | None = None, *, wavelength_nm=PCASP_WA
     return OpticalSetup(wavelength_nm, beams, (channel,), angular_step_deg=geom.ring_step_deg)
 
 
+def las_uhsas_proxy_setup(*, polarization: str, geom: UHSASGeom | None = None):
+    """Experimental LAS 3340-family model at 633 nm using UHSAS openings.
+
+    The LAS manual confirms opposing side collectors and a 633 nm cavity,
+    but does not specify these aperture angles. Moore et al. (2021), section
+    2.2, likewise use UHSAS angles for their LAS calculation. Our circular
+    annular cones are an explicit 3-D hypothesis, NOT a reproduction of their
+    angle-only calculation or an independently verified LAS geometry.
+
+    Select ``unpolarized``, ``perpendicular`` or ``parallel`` explicitly; the
+    latter two refer to the central plane containing beam and collector axes.
+    Unpolarized light is the incoherent equal-intensity sum of orthogonal
+    polarizations. Opposing detectors remain separate, normalized to total
+    incident irradiance, without gain or reflection/transmission losses.
+    """
+    states = {"unpolarized": ((1., 0., 0.), (0., 1., 0.)),
+              "perpendicular": ((1., 0., 0.),),
+              "parallel": ((0., 1., 0.),)}
+    if polarization not in states:
+        raise ValueError("polarization must be unpolarized, perpendicular or parallel")
+    base = uhsas_optical_setup(geom, wavelength_nm=633.)
+    vectors = states[polarization]
+    beams = tuple(IncidentBeam(direction=beam.direction, polarization=vector,
+                               irradiance_fraction=beam.irradiance_fraction/len(vectors))
+                  for beam in base.beams for vector in vectors)
+    return OpticalSetup(base.wavelength_nm, beams, base.channels,
+                        aerosol_direction=base.aerosol_direction,
+                        angular_step_deg=base.angular_step_deg)
+
+
 def channel_geometry_cache(beam, channel, step_deg):
     """Exact azimuth integration for arbitrary cone directions and exclusions.
 
@@ -314,7 +344,12 @@ def channel_geometry_cache(beam, channel, step_deg):
 
 
 def setup_geometry_cache(setup: OpticalSetup):
-    """Build reusable integration weights for each channel and each beam."""
+    """Calculate which directions reach each detector, once for each beam.
+
+    These weights depend on the optical geometry and polarization, not on
+    particle size or refractive index. Reuse them throughout a LUT build,
+    but rebuild them if the setup changes.
+    """
     return {channel.name: tuple(channel_geometry_cache(beam, channel, setup.angular_step_deg)
                                for beam in setup.beams) for channel in setup.channels}
 
@@ -334,20 +369,28 @@ def uhsas_geometry_cache(geom: UHSASGeom) -> _SideCollectionCache:
 
 
 def _collected_cross_section(D_nm, m_particle, wavelength_nm, cache):
-    """One polarized side-collection path, in um^2.
+    """One polarized collection path, in um^2.
 
     miepython qsca normalization supplies intensity per steradian, including
-    Qsca. P11-P12=|S1|^2 and P11+P12=|S2|^2: no extra factor of one half.
+    Qsca. P11-P12 and P11+P12 are the perpendicular and parallel squared
+    amplitudes in that normalization, not the unnormalized textbook amplitudes.
+    They already describe intensity: do not square them again or halve them.
     """
-    x = np.pi * D_nm / wavelength_nm
-    PM = mie.phase_matrix(m_particle, x, cache.mu, norm="qsca")
-    perpendicular = PM[0, 0, :] - PM[0, 1, :]
-    parallel = PM[0, 0, :] + PM[0, 1, :]
+    size_parameter = np.pi * D_nm / wavelength_nm
+    phase_matrix = mie.phase_matrix(m_particle, size_parameter, cache.mu, norm="qsca")
+    perpendicular = phase_matrix[0, 0, :] - phase_matrix[0, 1, :]
+    parallel = phase_matrix[0, 0, :] + phase_matrix[0, 1, :]
+    # The cache already integrates the squared polarization projections over
+    # accepted azimuths. Only sin(theta) dtheta remains of the solid angle.
     phi_integral = perpendicular * cache.perp_phi + parallel * cache.parallel_phi
     integrand = phi_integral * np.sin(cache.theta_rad)
     integral = (_trapz_numba(integrand, cache.theta_rad) if _HAVE_NUMBA
                 else np.trapezoid(integrand, cache.theta_rad))
     radius_um = 0.5 * D_nm * 1e-3
+    # The angular integral is still normalized to the particle's projected
+    # area. Multiply by pi*r^2 to get a cross-section in um^2. The alternative
+    # textbook prefactor (wavelength/2pi)^2 belongs to unnormalized amplitudes;
+    # applying it here as well would count the normalization twice.
     return np.pi * radius_um**2 * integral
 
 
@@ -419,15 +462,18 @@ def directional_cross_section(D_nm, m_particle, setup: OpticalSetup, directions)
     flat = directions.reshape(-1, 3)
     total = np.zeros(len(flat))
     for beam in setup.beams:
-        mu = np.clip(flat @ beam.direction, -1., 1.)
-        pm = mie.phase_matrix(m_particle, np.pi*D_nm/setup.wavelength_nm, mu, norm="qsca")
-        # E projected into each individual scattering plane, not a single
-        # central plane. At theta=0 or pi the two intensities are equal.
-        parallel = np.divide((flat @ beam.polarization)**2, 1-mu**2,
-                             out=np.zeros_like(mu), where=(1-mu**2) > 1e-14)
+        cos_theta = np.clip(flat @ beam.direction, -1., 1.)
+        phase_matrix = mie.phase_matrix(m_particle, np.pi*D_nm/setup.wavelength_nm, cos_theta, norm="qsca")
+        # Each outgoing ray and the beam define their own scattering plane.
+        # Find the fraction of electric-field intensity parallel to that plane;
+        # the rest is perpendicular. Using only the central plane would give
+        # incorrect polarization weights for rays elsewhere in the aperture.
+        # At exactly forward/backward scattering the two intensities are equal.
+        parallel = np.divide((flat @ beam.polarization)**2, 1-cos_theta**2,
+                             out=np.zeros_like(cos_theta), where=(1-cos_theta**2) > 1e-14)
         parallel = np.clip(parallel, 0., 1.)
-        total += beam.irradiance_fraction*((pm[0, 0]-pm[0, 1])*(1-parallel)
-                                          + (pm[0, 0]+pm[0, 1])*parallel)
+        total += beam.irradiance_fraction*((phase_matrix[0, 0]-phase_matrix[0, 1])*(1-parallel)
+                                          + (phase_matrix[0, 0]+phase_matrix[0, 1])*parallel)
     return (np.pi*(D_nm*.5e-3)**2*total).reshape(directions.shape[:-1])
 
 
@@ -558,6 +604,13 @@ def build_sigma_lut(
     parallel_backend: str = "threads",
     response_channel: str | None = None,
 ):
+    """Build a new lookup table of unsmoothed scattering cross-sections.
+
+    The stored axes are diameter [nm], real refractive index n, and imaginary
+    index k. Each n/k pair supplies one complete diameter-response curve.
+    Smoothing is done when using the table, not here. An interrupted build
+    keeps build_complete=False so the reader will reject it.
+    """
     kern = kernel.lower()
     if kern not in ("pops", "uhsas", "custom"):
         raise ValueError("kernel must be 'pops', 'uhsas' or 'custom'.")
@@ -632,6 +685,8 @@ def build_sigma_lut(
         result = setup_csca(Dg, m, calculation_setup, _cache=cache)
         return np.sum(list(result.values()), axis=0).astype(np.float32)
 
+    # Workers calculate separate refractive-index curves. The parent process
+    # writes each completed group, so workers do not write the same array chunks.
     block_n = chunks[1]
     total_k = kg.size
     for ik, k in enumerate(kg):
@@ -649,7 +704,9 @@ def build_sigma_lut(
             j0 = j1
         print(f"done k={k:g} (elapsed {time.perf_counter()-t_k:.2f}s)", flush=True)
 
-    # metadata (UHSAS: include effective disk diameters)
+    # Save the exact setup with the results so later plots and calculations
+    # can recover its directions, openings, exclusions and beam fractions.
+    # Mark complete only after all refractive-index curves have been written.
     attrs = {
         "description": f"{kernel_name} collected scattering cross-section (polarized solid-angle integral)",
         "optical_model_version": OPTICAL_MODEL_VERSION,
@@ -786,7 +843,10 @@ def _check_lut_model(root, *, allow_legacy=False):
 def sigma_query_zarr(zpath: str, D_nm: float, n: float, k: float, *,
                      allow_legacy=False) -> float:
     """
-    Trilinear interpolation via SciPy RegularGridInterpolator (values clamped to grid).
+    Read the LUT and interpolate between neighboring D, n and k coordinates.
+
+    Out-of-range queries use the nearest boundary, not extrapolation. This
+    function loads the whole table on each call; reuse SigmaLUT for many queries.
     """
     if not all(np.isfinite(v) for v in (D_nm, n, k)):
         raise ValueError("D_nm, n, and k must be finite")
@@ -809,10 +869,12 @@ def sigma_query_zarr(zpath: str, D_nm: float, n: float, k: float, *,
 
 
 class SigmaLUT:
-    """Load a completed, current-model LUT for fast trilinear queries.
+    """Keep a completed LUT in memory for repeated D, n and k interpolation.
 
     Historical tables require allow_legacy=True explicitly and emit a warning.
     That option is for comparisons, not for corrected production.
+    Queries outside the stored range are clipped to its boundaries. Clipping
+    is not a physically justified extension of the response beyond the table.
     """
     def __init__(self, zpath: str, *, allow_legacy=False):
         z = zarr.open(zpath, mode="r")
@@ -863,25 +925,41 @@ def make_monotone_sigma_interpolator(
     response_bins=None,
 ):
     """
-    Build monotone σ(D) and its inverse D(σ) with optional binning + isotonic regression.
+    Build a monotone response and its inverse on one shared log-log curve.
+
+    Diameters are in nm and cross-sections in um^2. Optional response_bins
+    groups LUT samples into equally spaced log-diameter intervals; these are
+    smoothing intervals, not the instrument's measurement bins. Grouped fits
+    use sample counts as weights, replacing any supplied sample_weight.
+
+    Isotonic regression removes decreases (or increases when increasing=False).
+    Equal fitted signals are replaced by one mean log-diameter. PCHIP, a
+    shape-preserving piecewise cubic, connects those retained points. The inverse
+    searches that SAME cubic rather than fitting another cubic with swapped axes.
+    Neither returned function extrapolates beyond its retained endpoint knots.
     """
-    D = np.asarray(D_nm, float)
-    S = np.asarray(sigma_col, float)
-    if D.ndim != 1 or S.ndim != 1 or D.size != S.size:
+    diameters = np.asarray(D_nm, float)
+    cross_sections = np.asarray(sigma_col, float)
+    if diameters.ndim != 1 or cross_sections.ndim != 1 or diameters.size != cross_sections.size:
         raise ValueError("D_nm and sigma_col must be 1D arrays with the same length")
-    if D.size < 2:
+    if diameters.size < 2:
         raise ValueError("Need at least two D/sigma points")
-    if np.any(~np.isfinite(D)) or np.any(~np.isfinite(S)) or np.any(D <= 0) or np.any(S <= 0):
+    if (np.any(~np.isfinite(diameters)) or np.any(~np.isfinite(cross_sections))
+            or np.any(diameters <= 0) or np.any(cross_sections <= 0)):
         raise ValueError("Need D>0 and σ>0 (uses log–log).")
 
-    order = np.argsort(D)
-    x = np.log(D[order])
-    y = np.log(S[order])
+    order = np.argsort(diameters)
+    # Natural logs are used internally; changing log base consistently would
+    # describe the same curve. Output remains physical diameter/cross-section.
+    x = np.log(diameters[order])
+    y = np.log(cross_sections[order])
 
     if response_bins is not None and response_bins > 1:
         response_bins = int(response_bins)
         edges = np.linspace(x.min(), x.max(), response_bins + 1)
-        xb, yb, wb = [], [], []
+        representative_log_diameters = []
+        representative_log_signals = []
+        representative_counts = []
         for i in range(response_bins):
             if i < response_bins-1:
                 mask = (x >= edges[i]) & (x < edges[i+1])
@@ -889,60 +967,73 @@ def make_monotone_sigma_interpolator(
                 mask = (x >= edges[i]) & (x <= edges[i+1])
             if not np.any(mask):
                 continue
-            xb.append(x[mask].mean())
-            yb.append(np.median(y[mask]))
-            wb.append(int(mask.sum()))
-        if len(xb) < 2:
+            representative_log_diameters.append(x[mask].mean())
+            representative_log_signals.append(np.median(y[mask]))
+            representative_counts.append(int(mask.sum()))
+        if len(representative_log_diameters) < 2:
             raise ValueError("Too few non-empty bins.")
-        x = np.asarray(xb); y = np.asarray(yb)
-        sample_weight = np.asarray(wb, float)
+        x = np.asarray(representative_log_diameters)
+        y = np.asarray(representative_log_signals)
+        sample_weight = np.asarray(representative_counts, float)
 
-    iso = IsotonicRegression(increasing=bool(increasing), out_of_bounds="clip")
+    isotonic_fit = IsotonicRegression(increasing=bool(increasing), out_of_bounds="clip")
     if sample_weight is None:
-        yhat = iso.fit_transform(x, y)
+        fitted_log_signals = isotonic_fit.fit_transform(x, y)
     else:
-        iso.fit(x, y, sample_weight=sample_weight)
-        yhat = iso.predict(x)
+        isotonic_fit.fit(x, y, sample_weight=sample_weight)
+        fitted_log_signals = isotonic_fit.predict(x)
 
-    vals, inv, counts = np.unique(yhat, return_inverse=True, return_counts=True)
-    if vals.size < 2:
+    distinct_log_signals, plateau_indices, plateau_counts = np.unique(
+        fitted_log_signals, return_inverse=True, return_counts=True
+    )
+    if distinct_log_signals.size < 2:
         raise ValueError("Isotonic fit collapsed to a constant.")
-    x_avg = np.bincount(inv, weights=x) / counts
+    # Average representative positions within each plateau without weighting
+    # them again by original sample count. This is a distinct step from isotonic
+    # regression's weighted adjustment of the representative signal values.
+    retained_log_diameters = np.bincount(plateau_indices, weights=x) / plateau_counts
     # The old forward curve kept plateaus, while the inverse replaced each
     # plateau with a mean diameter. Those were different curves. Use the same
     # representative knots for BOTH directions, then invert the forward curve
     # itself. Collapsing equal responses remains an explicit sizing approximation
     # in the Mie-oscillation region, not a resolution of its physical ambiguity.
     if increasing:
-        f_ll = PchipInterpolator(x_avg, vals, extrapolate=False)
+        log_response = PchipInterpolator(retained_log_diameters, distinct_log_signals, extrapolate=False)
     else:
-        f_ll = PchipInterpolator(x_avg[::-1], vals[::-1], extrapolate=False)
+        log_response = PchipInterpolator(retained_log_diameters[::-1], distinct_log_signals[::-1], extrapolate=False)
 
     def f_sigma(Dq):
-        Dq = np.asarray(Dq, float)
-        return np.exp(f_ll(np.log(Dq)))
+        # Preserve the callable's existing keyword while using a readable local name.
+        query_diameters = np.asarray(Dq, float)
+        return np.exp(log_response(np.log(query_diameters)))
 
     def g_diam(sig):
-        sig = np.asarray(sig, float)
-        result = np.full(sig.shape, np.nan)
-        flat = sig.ravel()
+        query_signals = np.asarray(sig, float)
+        result = np.full(query_signals.shape, np.nan)
+        flat = query_signals.ravel()
         valid = np.isfinite(flat) & (flat > 0)
         target = np.full(flat.shape, np.nan)
         target[valid] = np.log(flat[valid])
         # Accommodate only floating-point roundoff at the endpoint responses.
-        tol = 8 * np.finfo(float).eps * max(1.0, np.max(np.abs(vals)))
-        valid &= (target >= vals[0] - tol) & (target <= vals[-1] + tol)
+        tol = 8 * np.finfo(float).eps * max(1.0, np.max(np.abs(distinct_log_signals)))
+        valid &= (target >= distinct_log_signals[0] - tol) & (target <= distinct_log_signals[-1] + tol)
         if not np.any(valid):
             return result
-        q = np.clip(target[valid], vals[0], vals[-1])
-        j = np.clip(np.searchsorted(vals, q, side="right") - 1, 0, vals.size - 2)
-        low = np.minimum(x_avg[j], x_avg[j + 1])
-        high = np.maximum(x_avg[j], x_avg[j + 1])
+        target_log_signals = np.clip(target[valid], distinct_log_signals[0], distinct_log_signals[-1])
+        interval_index = np.clip(
+            np.searchsorted(distinct_log_signals, target_log_signals, side="right") - 1,
+            0, distinct_log_signals.size - 2,
+        )
+        low = np.minimum(retained_log_diameters[interval_index],
+                         retained_log_diameters[interval_index + 1])
+        high = np.maximum(retained_log_diameters[interval_index],
+                          retained_log_diameters[interval_index + 1])
         # Bracketed, vectorized bisection of the actual forward cubic. Forty-eight
         # halvings make log-diameter error negligible relative to LUT resolution.
         for _ in range(48):
             mid = 0.5 * (low + high)
-            go_right = (f_ll(mid) < q) if increasing else (f_ll(mid) > q)
+            go_right = ((log_response(mid) < target_log_signals) if increasing
+                        else (log_response(mid) > target_log_signals))
             low = np.where(go_right, mid, low)
             high = np.where(go_right, high, mid)
         result.ravel()[valid] = np.exp(0.5 * (low + high))
@@ -1027,6 +1118,9 @@ def convert_do_lut(
     if not np.all(np.isfinite(Do_nm_new)) or np.any(Do_nm_new <= 0):
         raise ValueError("Mapped diameters contain non-finite or non-positive values.")
     if not np.all(np.diff(Do_nm_new) > 0):
+        # Strictly increasing source and destination responses preserve edge
+        # order mathematically. Still reject finite-precision edge collapse here,
+        # before another routine divides concentration by a zero bin width.
         raise ValueError("Mapped diameters are not strictly increasing (check response_bins / LUT).")
 
     return Do_nm_new
@@ -1040,6 +1134,7 @@ __all__ = [
     "POPSGeom", "UHSASGeom", "PCASPGeom",
     "CollectionCone", "CollectionChannel", "IncidentBeam", "OpticalSetup",
     "pops_optical_setup", "uhsas_optical_setup", "pcasp_optical_setup", "optical_setup_from_lut_metadata",
+    "las_uhsas_proxy_setup",
     "setup_geometry_cache", "channel_geometry_cache", "setup_csca",
     "directional_cross_section", "build_setup_sigma_lut",
     "pops_geometry_cache", "uhsas_geometry_cache",

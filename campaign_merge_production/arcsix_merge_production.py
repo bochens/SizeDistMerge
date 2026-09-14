@@ -44,7 +44,9 @@ from sizedistmerge.optical_diameter import (
     RI_POPS_SRC,
 )
 from sizedistmerge.diameter_conversion import da_to_dv
-from sizedistmerge.combine import make_grid_from_series, merge_sizedists_tikhonov, merge_sizedists_tikhonov_consensus
+from sizedistmerge.combine import (make_grid_from_series, merge_sizedists_tikhonov,
+                                  merge_sizedists_tikhonov_consensus, smooth_weight_profile,
+                                  merge_sizedists_bin_totals, native_bin_consensus_multipliers)
 from sizedistmerge.plot import plot_size_distributions, plot_size_distributions_steps
 from sizedistmerge.resources import lut_path
 
@@ -67,6 +69,7 @@ __all__ = [
     "run_joint_optimization",
     "make_tikhonov_merged_spec",
     "make_consensus_merged_spec",
+    "make_bin_total_merged_spec",
     "plot_sizedist_all",
     "chunk_is_incloud",
     "write_day_netcdf",
@@ -78,6 +81,7 @@ __all__ = [
     "linear_resid_and_flag",
     "gather_post_merge_qc",
     "run_post_merge_product_qc",
+    "add_conservative_fims_qc",
     "write_icartt_from_netcdf",
     "convert_qc_netcdf_to_icartt",
 ]
@@ -101,6 +105,8 @@ class PostMergeQCResult:
     total_chunks: int
     kept_chunks: int
     dropped_extreme_chunks: int
+    dropped_zero_run_chunks: int = 0
+    dropped_chunks: int = 0
 
 
 def find_merged_netcdf_files(base_dir: str | Path) -> list[Path]:
@@ -309,6 +315,188 @@ def _chunk_cpc_values(
     return values
 
 
+def _filter_cpc_for_qc(cpc, data_dir, date_str, pad_s):
+    """Use the merge's inlet exclusion for CPC too; None retains historical QC."""
+    if pad_s is None or cpc.empty:
+        return cpc
+    flags = read_inlet_flag(Path(data_dir) / "LARGE-InletFlag", start=date_str,
+                           end=None, prefix="ARCSIX")
+    flags.index = timezone_naive_index(flags.index)
+    if flags.empty:
+        return cpc  # Retain unfiltered minutes; the raw product records missing flags.
+    return filter_chunk_by_inlet_flag(
+        {"CPC": cpc.to_frame("CPC")}, flags, cpc.index.min(), cpc.index.max(),
+        pad_s=pad_s)["CPC"]["CPC"]
+
+
+def find_wide_zero_runs(edges, values, *, min_bins=2, min_diameter_ratio=2.0):
+    """Find internal exact-zero runs in native bins, before interpolation.
+
+    A run must have positive, finite immediate neighbours on both sides.
+    Missing/negative bins break a run; outer zero tails do not qualify.
+    Width is the upper/lower edge ratio on the supplied diameter basis.
+    This is a QC policy, not proof that the zero measurements are erroneous.
+    """
+    edges = np.asarray(edges, float)
+    values = np.asarray(values, float)
+    if (values.ndim != 1 or edges.ndim != 1 or edges.size != values.size + 1
+            or np.any(~np.isfinite(edges)) or np.any(edges <= 0)
+            or np.any(np.diff(edges) <= 0)):
+        raise ValueError("Expected increasing positive edges and one value per bin")
+    if int(min_bins) != min_bins or min_bins < 1 or not np.isfinite(min_diameter_ratio) or min_diameter_ratio <= 1:
+        raise ValueError("min_bins must be a positive integer and diameter ratio >1")
+    zero = values == 0
+    starts = np.flatnonzero(zero & ~np.r_[False, zero[:-1]])
+    stops = np.flatnonzero(zero & ~np.r_[zero[1:], False]) + 1
+    runs = []
+    for start, stop in zip(starts, stops):
+        if start == 0 or stop == values.size:
+            continue
+        neighbours = values[[start - 1, stop]]
+        if not np.all(np.isfinite(neighbours) & (neighbours > 0)):
+            continue
+        ratio = edges[stop] / edges[start]
+        if stop - start >= min_bins and ratio >= min_diameter_ratio:
+            runs.append(dict(first_bin=int(start), n_bins=int(stop-start),
+                             lower_nm=float(edges[start]), upper_nm=float(edges[stop]),
+                             diameter_ratio=float(ratio)))
+    return runs
+
+
+def source_zero_run_qc(specs, *, reference_source_flag, reference_min=10., reference_max=500.):
+    """Check averaged source spectra on reported diameters, before conversion."""
+    if reference_source_flag not in (0, 1):
+        raise ValueError("reference_source_flag must be 0=FIMS or 1=PUTLS-MERGE")
+    runs = []
+    for name in ('FIMS', 'UHSAS', 'POPS', 'APS'):
+        if name not in specs:
+            continue
+        spec = specs[name]
+        if name == 'FIMS':
+            spec = select_between(*spec, xmin=reference_min, xmax=reference_max)
+        for run in find_wide_zero_runs(spec[1], spec[2]):
+            runs.append(dict(instrument='PUTLS-MERGE' if name == 'FIMS' and reference_source_flag else name, **run))
+    return runs
+
+
+def concentration_ratio_warning(a, b, *, factor, absolute_floor):
+    """0/1 warning for a large ratio AND absolute difference; unknown is NaN."""
+    if not np.isfinite(factor) or factor <= 1:
+        raise ValueError("Ratio factor must be finite and greater than one")
+    if not np.isfinite(absolute_floor) or absolute_floor < 0:
+        raise ValueError("Absolute concentration floor must be finite and nonnegative")
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    if a.shape != b.shape:
+        raise ValueError("Concentration arrays must have matching shapes")
+    valid = np.isfinite(a) & np.isfinite(b) & (a >= 0) & (b >= 0)
+    warning = ((a > factor*b) | (b > factor*a)) & (np.abs(a-b) > absolute_floor)
+    return np.where(valid, warning.astype(float), np.nan)
+
+
+def number_in_band(spectra, edges, *, lower_nm=100., upper_nm=300.):
+    """Integrate saved bin averages; require full finite, nonnegative coverage."""
+    y, e = np.asarray(spectra, float), np.asarray(edges, float)
+    if (y.ndim != 2 or e.ndim != 1 or y.shape[1]+1 != e.size
+            or not np.all(np.isfinite(e)) or np.any(e <= 0) or np.any(np.diff(e) <= 0)
+            or not 0 < lower_nm < upper_nm):
+        raise ValueError("Expected valid spectra, increasing edges, and a positive diameter band")
+    if e[0] > lower_nm or e[-1] < upper_nm:
+        return np.full(y.shape[0], np.nan)
+    width = np.maximum(0., np.log10(np.minimum(e[1:], upper_nm)
+                                    / np.maximum(e[:-1], lower_nm)))
+    active = width > 0
+    valid = np.all(np.isfinite(y[:, active]) & (y[:, active] >= 0), axis=1)
+    total = y[:, active] @ width[active]
+    return np.where(valid, total, np.nan)
+
+
+def add_conservative_fims_qc(
+    nc_paths, qc_table, *, fims_uhsas_factor=3., relative_cpc_factor=4.,
+    overlap_absolute_floor=20., cpc_absolute_floor=50.,
+    cpc_column="CPC_median_CNgt10nm",
+):
+    """Add warnings to QC copies only; never remove rows or change spectra.
+
+    Both new checks apply only to actual FIMS-reference rows. Missing coverage,
+    invalid measurements, and fallback rows have missing flags, not passed flags.
+    A None factor disables that check. Existing R1-style warning fields are kept.
+    qc_table must contain the same inlet-filtered CPC values as the original QC.
+    """
+    for factor, floor in ((fims_uhsas_factor, overlap_absolute_floor),
+                          (relative_cpc_factor, cpc_absolute_floor)):
+        if factor is not None:
+            concentration_ratio_warning(np.array([1.]), np.array([1.]),
+                                        factor=factor, absolute_floor=floor)
+    table = qc_table.copy()
+    for name in ('time_start', 'time_end'):
+        table[name] = pd.to_datetime(table[name])
+    table = table.set_index(['time_start', 'time_end'], verify_integrity=True)
+    if cpc_column not in table:
+        raise ValueError(f"QC table is missing {cpc_column}")
+    for path in nc_paths:
+        with Dataset(path, 'a') as ds:
+            base = _parse_base_time(ds)
+            starts, ends = (_read_1d(ds, v) for v in
+                            ('time_start_since_base_s', 'time_end_since_base_s'))
+            keys = pd.MultiIndex.from_arrays([
+                pd.to_datetime(base)+pd.to_timedelta(starts, unit='s'),
+                pd.to_datetime(base)+pd.to_timedelta(ends, unit='s')])
+            if not keys.isin(table.index).all():
+                raise ValueError(f"QC table does not exactly match {path}")
+            cpc = table.loc[keys, cpc_column].to_numpy(float)
+            reference = _read_1d(ds, 'reference_source_flag')
+            is_fims = reference == 0
+            edges = _read_1d(ds, 'fine_edges_nm')
+            fims = number_in_band(_read_2d(ds, 'fims_aligned_dNdlogDp'), edges)
+            uhsas = number_in_band(_read_2d(ds, 'uhsas_aligned_dNdlogDp'), edges)
+            merged = table.loc[keys, 'MERGED_total_gt10nm'].to_numpy(float)
+            diagnostics = {'qc_fims_number_100_300nm': fims,
+                           'qc_uhsas_number_100_300nm': uhsas,
+                           'qc_cpc_number_gt10nm': cpc}
+            warnings = {}
+            if fims_uhsas_factor is not None:
+                warnings['warning_severe_fims_uhsas_disagreement'] = (
+                    concentration_ratio_warning(fims, uhsas, factor=fims_uhsas_factor,
+                                                absolute_floor=overlap_absolute_floor),
+                    f'FIMS/UHSAS number ratio outside [1/{fims_uhsas_factor:g}, '
+                    f'{fims_uhsas_factor:g}] over aligned 100-300 nm, AND absolute '
+                    f'difference > {overlap_absolute_floor:g} cm-3.')
+            if relative_cpc_factor is not None:
+                warnings['warning_merged_gt10_relative_diff_from_cpc'] = (
+                    concentration_ratio_warning(merged, cpc, factor=relative_cpc_factor,
+                                                absolute_floor=cpc_absolute_floor),
+                    f'Merged/CPC number ratio outside [1/{relative_cpc_factor:g}, '
+                    f'{relative_cpc_factor:g}], AND absolute difference > '
+                    f'{cpc_absolute_floor:g} cm-3; total above 10 nm.')
+            new_names = set(diagnostics) | set(warnings)
+            if new_names.intersection(ds.variables):
+                raise ValueError(f"Additional QC already exists in {path}; use untouched QC copies")
+            dims = ds.variables['reference_source_flag'].dimensions
+            for name, values in diagnostics.items():
+                v = ds.createVariable(name, 'f8', dims, fill_value=np.nan)
+                v[:] = values
+                v.units = '#/cm3'
+                v.long_name = name.replace('_', ' ')
+                if '100_300nm' in name:
+                    v.comment = 'Integrated saved aligned bin averages; full band coverage required.'
+                else:
+                    v.comment = 'Exact CPC statistic from the original post-merge QC table.'
+                table.loc[keys, name] = values
+            for name, (values, description) in warnings.items():
+                values = np.where(is_fims, values, np.nan)
+                v = ds.createVariable(name, 'i1', dims, fill_value=-127)
+                v[:] = np.where(np.isfinite(values), values, -127).astype(np.int8)
+                v.units = '1'
+                v.flag_values = np.array([0, 1], dtype=np.int8)
+                v.flag_meanings = 'ok warning'
+                v.long_name = name.replace('_', ' ')
+                v.comment = description + (' Actual FIMS-reference rows only; missing means '
+                    'not applicable or insufficient data. Warning only: no row removal.')
+                table.loc[keys, name] = values
+            ds.additional_qc_policy = 'conservative-fims-warnings-v1; existing flags and exclusions unchanged'
+    return table.reset_index()
+
+
 def gather_post_merge_qc(
     base_dir: str | Path,
     data_dir: str | Path,
@@ -317,6 +505,7 @@ def gather_post_merge_qc(
     cpc_column: str = "CNgt10nm",
     cpc_statistic: str = "median",
     micro_dir: str | Path | None = None,
+    cpc_inlet_pad_s: int | None = None,
 ) -> pd.DataFrame:
     """Collect per-chunk QC quantities from raw merge NetCDF files."""
 
@@ -332,7 +521,9 @@ def gather_post_merge_qc(
     for nc_path in nc_files:
         date_str = nc_path.stem.split("_")[0]
         if date_str not in micro_cache:
-            micro_cache[date_str] = _read_cpc_series(micro_path, date_str, cpc_column)
+            micro_cache[date_str] = _filter_cpc_for_qc(
+                _read_cpc_series(micro_path, date_str, cpc_column),
+                data_dir, date_str, cpc_inlet_pad_s)
         cpc_series = micro_cache[date_str]
 
         with Dataset(nc_path, mode="r") as ds:
@@ -354,6 +545,7 @@ def gather_post_merge_qc(
             uhsas_n = _optional_1d(ds, "retrieved_uhsas_n_fit", n_chunks)
             pops_n = _optional_1d(ds, "retrieved_pops_n_fit", n_chunks)
             rho = _optional_1d(ds, "retrieved_aps_density", n_chunks)
+            zero_run_flag = _optional_1d(ds, "qc_wide_source_zero_run", n_chunks)
             merged_total = integrate_dndlog_gt_cutoff(merged, edges, cutoff_nm)
             cpc_values = _chunk_cpc_values(
                 cpc_series,
@@ -377,6 +569,7 @@ def gather_post_merge_qc(
             records.append(
                 {
                     "source_nc": str(nc_path),
+                    "qc_wide_source_zero_run": zero_run_flag[idx],
                     "date": date_str,
                     "chunk": idx,
                     "time_start": t0,
@@ -560,6 +753,7 @@ def _write_qc_flagged_nc_files(
     r_med: float,
     sigma_r: float,
     micro_dir: Path | None,
+    cpc_inlet_pad_s: int | None = None,
 ) -> tuple[tuple[Path, ...], int, int]:
     out_dir.mkdir(parents=True, exist_ok=True)
     nc_files = find_merged_netcdf_files(base_dir)
@@ -573,7 +767,9 @@ def _write_qc_flagged_nc_files(
         dst_path = out_dir / src_path.name
         date_str = src_path.stem.split("_")[0]
         if date_str not in micro_cache:
-            micro_cache[date_str] = _read_cpc_series(micro_path, date_str, cpc_column)
+            micro_cache[date_str] = _filter_cpc_for_qc(
+                _read_cpc_series(micro_path, date_str, cpc_column),
+                data_dir, date_str, cpc_inlet_pad_s)
         cpc_series = micro_cache[date_str]
 
         with Dataset(src_path, mode="r") as src:
@@ -609,10 +805,13 @@ def _write_qc_flagged_nc_files(
                 (residual < r_med - float(k_sigma_drop) * sigma_r)
                 | (residual > r_med + float(k_sigma_drop) * sigma_r)
             )
+            # Absent diagnostics remain unknown, not a passed zero-run check.
+            zero_run_flag = _optional_1d(src, "qc_wide_source_zero_run", n_chunks)
+            drop_mask |= zero_run_flag == 1
             keep_idx = np.flatnonzero(~drop_mask).astype(int)
             if keep_idx.size <= 0:
                 raise RuntimeError(
-                    f"{src_path}: all chunks were dropped by extreme CPC filter; "
+                    f"{src_path}: all chunks were dropped by QC filters; "
                     "refusing to write empty QC NetCDF"
                 )
 
@@ -671,9 +870,15 @@ def run_post_merge_product_qc(
     cpc_statistic: str = "median",
     plot_lo: float = 0.0,
     plot_hi: float = 8000.0,
+    require_zero_run_qc: bool = False,
+    cpc_inlet_pad_s: int | None = None,
+    fims_uhsas_factor: float | None = None,
+    relative_cpc_factor: float | None = None,
 ) -> PostMergeQCResult:
     """Write post-merge QC plots, CSV, and QC-flagged NetCDF copies."""
 
+    if (fims_uhsas_factor is not None or relative_cpc_factor is not None) and cutoff_nm != 10.:
+        raise ValueError('Additional FIMS QC currently requires a 10 nm CPC cutoff')
     base = Path(base_dir)
     data_path = Path(data_dir)
     qc_plot_dir = Path(qc_dir) if qc_dir is not None else base / "qc_plots"
@@ -687,8 +892,11 @@ def run_post_merge_product_qc(
         cpc_column=cpc_column,
         cpc_statistic=cpc_statistic,
         micro_dir=micro_dir,
+        cpc_inlet_pad_s=cpc_inlet_pad_s,
     )
     cpc_col = f"CPC_{cpc_statistic}_{cpc_column}"
+    if require_zero_run_qc and not table['qc_wide_source_zero_run'].isin([0, 1]).all():
+        raise ValueError("Source zero-run QC is missing; audit native source bins before export")
     merged_col = f"MERGED_total_gt{int(cutoff_nm)}nm"
 
     r_low, r_high, r_med, sigma_r = compute_robust_linear_bounds(
@@ -766,7 +974,14 @@ def run_post_merge_product_qc(
         r_med=r_med,
         sigma_r=sigma_r,
         micro_dir=Path(micro_dir) if micro_dir is not None else None,
+        cpc_inlet_pad_s=cpc_inlet_pad_s,
     )
+
+    if fims_uhsas_factor is not None or relative_cpc_factor is not None:
+        table = add_conservative_fims_qc(
+            qc_paths, table, fims_uhsas_factor=fims_uhsas_factor,
+            relative_cpc_factor=relative_cpc_factor, cpc_column=cpc_col)
+        table.to_csv(table_path, index=False)
 
     return PostMergeQCResult(
         qc_table_path=table_path,
@@ -779,7 +994,9 @@ def run_post_merge_product_qc(
         sigma_r=sigma_r,
         total_chunks=int(len(table)),
         kept_chunks=int(kept),
-        dropped_extreme_chunks=int(dropped),
+        dropped_extreme_chunks=int(np.sum(np.isfinite(residual) & (np.abs(residual-r_med) > k_sigma_drop*sigma_r))),
+        dropped_zero_run_chunks=int(np.sum(table['qc_wide_source_zero_run'] == 1)),
+        dropped_chunks=int(dropped),
     )
 
 
@@ -1019,6 +1236,13 @@ def write_icartt_from_netcdf(
             one_d_vars["retrieved_pops_n_fit"] = _read_1d(ds, "retrieved_pops_n_fit")
         if "reference_source_flag" in ds.variables:
             one_d_vars["reference_source_flag"] = _read_1d(ds, "reference_source_flag")
+        if "warning_missing_inlet_flag" in ds.variables:
+            one_d_vars["warning_missing_inlet_flag"] = _read_1d(ds, "warning_missing_inlet_flag")
+        extra_warning_names = [name for name in (
+            'warning_severe_fims_uhsas_disagreement',
+            'warning_merged_gt10_relative_diff_from_cpc') if name in ds.variables]
+        for name in extra_warning_names:
+            one_d_vars[name] = _read_1d(ds, name)
 
         for name, values in one_d_vars.items():
             if values.size != t0_s.size:
@@ -1047,7 +1271,42 @@ def write_icartt_from_netcdf(
         dep_names.append("retrieved_aps_density")
         if "reference_source_flag" in one_d_vars:
             dep_names.append("reference_source_flag")
+        if "warning_missing_inlet_flag" in one_d_vars:
+            dep_names.append("warning_missing_inlet_flag")
+        dep_names.extend(extra_warning_names)
         dep_names.extend(bin_labels)
+
+        # Append one-standard-deviation errors, not precomputed interval limits.
+        # Older files keep their exact layout and all DNLOG columns stay in place.
+        uncertainty_arrays = []
+        uncertainty_definitions = []
+        for field, prefix, units, description in (
+            ('merged_log10_standard_uncertainty', 'SD_LOG10', '1',
+             'One standard uncertainty in log10 concentration; band is DNLOG times 10**(+/- k*SD_LOG10)'),
+            ('merged_dNdlogDp_standard_uncertainty', 'SD_DNLOG', '#/cm3',
+             'First-order linear concentration standard uncertainty; ln(10)*DNLOG*SD_LOG10'),
+        ):
+            if field in ds.variables:
+                values = _read_2d(ds, field)
+                if values.shape != merged.shape:
+                    raise RuntimeError(f'{field} dimensions differ from merged distribution')
+                uncertainty_arrays.append(values)
+                for idx, label in enumerate(bin_labels):
+                    # Separate prefix preserves common startswith('DNLOG_') readers.
+                    name = f'{prefix}_{idx+1:03d}'
+                    dep_names.append(name)
+                    uncertainty_definitions.append(
+                        f'{name}, {units}, {name}, {description} for bin {idx+1:03d}; '
+                        'temporal uncertainty of mean only; conditional on fitted alignment')
+        if len(uncertainty_arrays) == 1:
+            raise RuntimeError('Both log10 and linear standard uncertainty fields are required')
+        if uncertainty_arrays:
+            # Do not label these new data with the legacy flat 20-percent statement.
+            uncertainty = getattr(ds, 'concentration_uncertainty_description',
+                'Temporal concentration uncertainty of mean, conditional on fitted alignment. '
+                'SD_LOG10 contains one log10 standard uncertainty; bands are DNLOG*10**(+/- k*SD_LOG10). '
+                'SD_DNLOG is the first-order linear standard uncertainty. '
+                'Alignment, calibration and other systematic uncertainties are not included.')
 
         dep_def_lines = [
             "Time_Stop, seconds, Time_Stop, Seconds from 00:00 on measurement date at stop of chunk",
@@ -1086,11 +1345,20 @@ def write_icartt_from_netcdf(
                 "reference_source_flag, none, DataQuality_ReferenceSource_Merged_SizeDistribution, "
                 "Reference spectrum source for merge alignment: 0=FIMS, 1=PUTLS-MERGE"
             )
+        if "warning_missing_inlet_flag" in one_d_vars:
+            dep_def_lines.append(
+                "warning_missing_inlet_flag, none, DataQuality_WarningFlag_MissingInletFlag, "
+                "1 if any one-second slot lacks primary inlet flag data; minute retained"
+            )
+        for name in extra_warning_names:
+            dep_def_lines.append(f'{name}, none, DataQuality_{name}, '
+                                 + ds.variables[name].comment)
         for idx, label in enumerate(bin_labels):
             dep_def_lines.append(
                 f"{label}, #/cm3, {bin_stdnames[idx]}, "
                 f"Merged dN/dlog10(Dp) for bin {idx + 1:03d}"
             )
+        dep_def_lines.extend(uncertainty_definitions)
 
         if len(dep_names) != len(dep_def_lines):
             raise RuntimeError("Internal ICARTT variable definition length mismatch")
@@ -1170,8 +1438,16 @@ def write_icartt_from_netcdf(
         if "reference_source_flag" in one_d_vars:
             output[:, col] = one_d_vars["reference_source_flag"]
             col += 1
-        output[:, col:] = merged
-        if col + merged.shape[1] != output.shape[1]:
+        if "warning_missing_inlet_flag" in one_d_vars:
+            output[:, col] = one_d_vars["warning_missing_inlet_flag"]
+            col += 1
+        for name in extra_warning_names:
+            output[:, col] = one_d_vars[name]
+            col += 1
+        for values in [merged, *uncertainty_arrays]:
+            output[:, col:col+values.shape[1]] = values
+            col += values.shape[1]
+        if col != output.shape[1]:
             raise RuntimeError("Internal ICARTT column packing mismatch")
 
     with out_path.open("w", newline="\n") as handle:
@@ -2145,6 +2421,9 @@ def run_joint_optimization(
     optimizer_tol: float = 1e-6,
     optimizer_popsize: int = 15,
     optimizer_polish: bool = True,
+    response_bins_fit: int = 50,
+    response_bins_apply: int = 120,
+    optimizer_seed: int = 123,
 ):
     """
     Jointly optimize loaded OPC/APS instruments against FIMS.
@@ -2152,6 +2431,11 @@ def run_joint_optimization(
     FIMS is the reference. UHSAS, POPS, and APS are included when present in
     ``specs``. The returned ``opt_res`` includes fitted labels so callers do
     not have to reconstruct display names from rounded parameters.
+
+    ``response_bins_fit`` and ``response_bins_apply`` control optical-response
+    smoothing, not aerosol histogram bins. Defaults retain the R1 recipe.
+    Setting them equal uses the same response construction in both stages;
+    doing so changes the numerical recipe and requires a separate comparison.
     """
     if "FIMS" not in specs:
         raise ValueError("FIMS spectrum is required for joint optimization.")
@@ -2165,12 +2449,17 @@ def run_joint_optimization(
         raise ValueError("optimizer_maxiter must be >= 1")
     if optimizer_popsize < 1:
         raise ValueError("optimizer_popsize must be >= 1")
+    for name, value in (("response_bins_fit", response_bins_fit),
+                        ("response_bins_apply", response_bins_apply)):
+        if not isinstance(value, (int, np.integer)) or value < 2:
+            raise ValueError(f"{name} must be an integer >= 2")
 
     if pops_bounds is None:
         pops_bounds = uhsas_bounds
     if pops_ri_src is None:
-        # Legacy ARCSIX production used the UHSAS source RI for POPS LUT remapping.
-        pops_ri_src = RI_UHSAS_SRC
+        # ARCSIX POPS R1 diameters are PSL-equivalent, not ammonium-sulfate-equivalent.
+        # Pass RI_UHSAS_SRC explicitly only to reproduce the erroneous merged R1 product.
+        pops_ri_src = RI_POPS_SRC
 
     m_FIMS, e_FIMS, y_FIMS, s_FIMS = specs["FIMS"]
     m_fims_sel, e_fims_sel, y_fims_sel, s_fims_sel = select_between(
@@ -2192,7 +2481,7 @@ def run_joint_optimization(
             m_UHSAS, e_UHSAS, y_UHSAS, s_UHSAS, xmin=uhsas_xmin, xmax=uhsas_xmax
         )
         lut_uhsas = _load_uhsas_lut(lut_dir)
-        source_sigma_fn = _make_source_sigma_fn(lut_uhsas, RI_UHSAS_SRC, response_bins=50)
+        source_sigma_fn = _make_source_sigma_fn(lut_uhsas, RI_UHSAS_SRC, response_bins=response_bins_fit)
         selected["UHSAS"] = (e_sel, y_sel, s_sel, lut_uhsas)
         instruments.append(
             {
@@ -2203,7 +2492,7 @@ def run_joint_optimization(
                 "kwargs": {
                     "lut": lut_uhsas,
                     "ri_src": RI_UHSAS_SRC,
-                    "response_bins": 50,
+                    "response_bins": response_bins_fit,
                     "source_sigma_fn": source_sigma_fn,
                 },
             }
@@ -2217,7 +2506,7 @@ def run_joint_optimization(
             m_POPS, e_POPS, y_POPS, s_POPS, xmin=pops_xmin, xmax=pops_xmax
         )
         lut_pops = _load_pops_lut(lut_dir)
-        source_sigma_fn = _make_source_sigma_fn(lut_pops, pops_ri_src, response_bins=50)
+        source_sigma_fn = _make_source_sigma_fn(lut_pops, pops_ri_src, response_bins=response_bins_fit)
         selected["POPS"] = (e_sel, y_sel, s_sel, lut_pops)
         instruments.append(
             {
@@ -2228,7 +2517,7 @@ def run_joint_optimization(
                 "kwargs": {
                     "lut": lut_pops,
                     "ri_src": pops_ri_src,
-                    "response_bins": 50,
+                    "response_bins": response_bins_fit,
                     "source_sigma_fn": source_sigma_fn,
                 },
             }
@@ -2284,7 +2573,7 @@ def run_joint_optimization(
         tol=float(optimizer_tol),
         popsize=optimizer_popsize,
         polish=optimizer_polish,
-        seed=123,
+        seed=optimizer_seed,
     )
 
     opt_res = {
@@ -2297,7 +2586,15 @@ def run_joint_optimization(
         "temporal_target": temporal_target,
         "temporal_weights": temporal_weights,
         "pops_ri_src": pops_ri_src,
+        "response_bins_fit": response_bins_fit,
+        "response_bins_apply": response_bins_apply,
         "hist": hist,
+        "optimizer_diagnostics": {
+            "success": getattr(_res, "success", None),
+            "message": str(getattr(_res, "message", "unavailable")),
+            "nit": getattr(_res, "nit", None),
+            "nfev": getattr(_res, "nfev", None),
+        },
         "fit_labels": {},
     }
     style = {
@@ -2313,13 +2610,13 @@ def run_joint_optimization(
 
         if name == "UHSAS":
             fit_edges = _uhsas_remap_fn(
-                edges, [value], lut=lut, ri_src=RI_UHSAS_SRC, response_bins=120
+                edges, [value], lut=lut, ri_src=RI_UHSAS_SRC, response_bins=response_bins_apply
             )
             label = f"UHSAS fit (n={value:.3f})"
             opt_res["n_fit"] = value
         elif name == "POPS":
             fit_edges = _pops_remap_fn(
-                edges, [value], lut=lut, ri_src=pops_ri_src, response_bins=120
+                edges, [value], lut=lut, ri_src=pops_ri_src, response_bins=response_bins_apply
             )
             label = f"POPS fit (n={value:.3f})"
             opt_res["n_pops_fit"] = value
@@ -2424,6 +2721,67 @@ def make_tikhonov_merged_spec(
     return specs_out, line_kwargs_out, fill_kwargs_out, diag
 
 
+def make_bin_total_merged_spec(
+    aligned, *, output_edges_nm, lam, weights, weight_profiles=None,
+    preserve_zero_endpoints=None, zero_scale_factor=1.0,
+    use_consensus=False, consensus_c=2.0,
+):
+    """Combine converted native-bin totals on the caller's fixed output edges.
+
+    aligned maps instrument names to (edges_nm, dN/dlog10D). The FIMS slot may
+    hold the explicitly identified PUTLS reference, as in alignment. Profiles
+    are absolute weights evaluated at native geometric bin centers. This path
+    never interpolates input measurements. Optional consensus uses one
+    log-width-averaged agreement multiplier per native bin, not per output bin.
+
+    Optional endpoint zeros use the adjacent positive mean height times the
+    zero bin's log width as the concentration-error scale. zero_scale_factor
+    multiplies that scale; 1 uses the tested neighboring-bin normalization.
+    This is a weighting convention, not a measured counting uncertainty.
+    """
+    profiles = weight_profiles or {}
+    endpoints = preserve_zero_endpoints or {}
+    names = {'FIMS', 'UHSAS', 'POPS', 'APS'}
+    if (set(aligned) - names or set(weights) - names or set(profiles) - names
+            or set(endpoints) - names):
+        raise ValueError('Unknown instrument in native-bin combination settings')
+    if any(end not in ('first', 'last') for end in endpoints.values()):
+        raise ValueError("Endpoint selection must be 'first' or 'last'")
+    if not np.isfinite(zero_scale_factor) or zero_scale_factor <= 0:
+        raise ValueError('zero_scale_factor must be finite and positive')
+    series = []
+    for name, (edges, height) in aligned.items():
+        edges, height = np.asarray(edges, float), np.asarray(height, float)
+        width = delta_log10_from_edges(edges)
+        if height.shape != width.shape:
+            raise ValueError(f'{name}: one concentration is required per native bin')
+        alpha = (smooth_weight_profile(mids_from_edges(edges), **profiles[name])
+                 if name in profiles else weights[name])
+        item = dict(name=name, edges=edges, number=height*width, alpha=alpha)
+        positives = np.flatnonzero(np.isfinite(height) & (height > 0))
+        if name in endpoints and positives.size:
+            neighbour = positives[0] if endpoints[name] == 'first' else positives[-1]
+            item.update(zero_endpoint=endpoints[name],
+                        zero_number_scale=zero_scale_factor*height[neighbour]*width)
+        series.append(item)
+    multipliers = (native_bin_consensus_multipliers(series, consensus_c) if use_consensus
+                   else [np.ones_like(s['number']) for s in series])
+    adjusted = [dict(s, alpha=np.asarray(s['alpha'])*m) for s, m in zip(series, multipliers)]
+    y, diag = merge_sizedists_bin_totals(output_edges_nm, adjusted, lam=lam)
+    lookup = {s['name']: (s, m) for s, m in zip(series, multipliers)}
+    diag['base_bin_weight'] = np.array([
+        np.broadcast_to(lookup[n][0]['alpha'], lookup[n][0]['number'].shape)[i]
+        * np.diff(np.log10(lookup[n][0]['edges']))[i] for n, i in diag['used_bins']])
+    diag['consensus_multiplier'] = np.array([lookup[n][1][i] for n, i in diag['used_bins']])
+    diag['use_consensus'] = bool(use_consensus)
+    diag['consensus_c'] = float(consensus_c)
+    diag['consensus_method'] = 'native-bin-log-width-average-median-mad-v1' if use_consensus else 'off'
+    edges = np.asarray(output_edges_nm, float)
+    mids = mids_from_edges(edges)
+    spec = {'Merged': (mids, edges.copy(), y, np.full_like(y, np.nan))}
+    return spec, {'Merged': {'color': 'black', 'linewidth': 2.5, 'zorder': 10}}, {'Merged': False}, diag
+
+
 def make_consensus_merged_spec(
     *,
     e_fims_sel,
@@ -2441,10 +2799,29 @@ def make_consensus_merged_spec(
     alpha_pops: float = 1.0,
     alpha_aps: float = 1.0,
     c_punish: float = 1.0,
+    use_consensus: bool = True,
     data_space: str = "linear",
+    weight_profiles: dict[str, dict] | None = None,
+    ignore_nonpositive_source: bool = False,
+    preserve_zero_endpoints: dict[str, str] | None = None,
 ):
     """
     Consensus Tikhonov merge for FIMS, APS, and optional UHSAS/POPS fits.
+
+    use_consensus=False disables the agreement adjustment, not the base
+    instrument weights or smoothing. The default preserves historical runs.
+
+    Optional weight_profiles maps an instrument name to the keyword arguments
+    of smooth_weight_profile (start_nm, end_nm, start_weight, end_weight).
+    Each profile replaces that instrument's constant alpha with ABSOLUTE
+    weights on the solver grid. Instruments without profiles keep their alpha.
+    Profiles for absent optional instruments are unused. Unknown names raise.
+    No profiles or zero-removal policy are enabled by default, for R1 replay.
+    preserve_zero_endpoints optionally maps instrument names to 'first' or
+    'last'. Only the zero immediately before the first positive sample or after
+    the last positive sample, respectively, is retained
+    before interpolation; negative/missing bins are not retained. The caller
+    must distinguish actual FIMS from fallback spectra in the FIMS slot.
     """
     if e_aps_fit is None or y_aps_fit is None:
         raise ValueError("APS fitted spectrum is required for consensus merge.")
@@ -2452,24 +2829,47 @@ def make_consensus_merged_spec(
     series = [
         {"x": mids_from_edges(e_fims_sel), "y": y_fims_sel, "alpha": float(alpha_fims)},
     ]
+    series_names = ["FIMS"]
     label_parts = ["F"]
 
-    if e_uhsas_fit is not None and y_uhsas_fit is not None and float(alpha_uhsas) != 0.0:
+    if e_uhsas_fit is not None and y_uhsas_fit is not None and (
+        float(alpha_uhsas) != 0.0 or "UHSAS" in (weight_profiles or {})
+    ):
         series.append(
             {"x": mids_from_edges(e_uhsas_fit), "y": y_uhsas_fit, "alpha": float(alpha_uhsas)}
         )
         label_parts.append("U")
+        series_names.append("UHSAS")
 
-    if e_pops_fit is not None and y_pops_fit is not None and float(alpha_pops) != 0.0:
+    if e_pops_fit is not None and y_pops_fit is not None and (
+        float(alpha_pops) != 0.0 or "POPS" in (weight_profiles or {})
+    ):
         series.append(
             {"x": mids_from_edges(e_pops_fit), "y": y_pops_fit, "alpha": float(alpha_pops)}
         )
         label_parts.append("P")
+        series_names.append("POPS")
 
     series.append({"x": mids_from_edges(e_aps_fit), "y": y_aps_fit, "alpha": float(alpha_aps)})
     label_parts.append("A")
+    series_names.append("APS")
+
+    if preserve_zero_endpoints is not None:
+        unknown = set(preserve_zero_endpoints) - {"FIMS", "UHSAS", "POPS", "APS"}
+        if unknown or any(v not in ("first", "last") for v in preserve_zero_endpoints.values()):
+            raise ValueError("preserve_zero_endpoints must map known instruments to 'first' or 'last'")
+        for name, item in zip(series_names, series):
+            if name in preserve_zero_endpoints:
+                item["preserve_zero_endpoint"] = preserve_zero_endpoints[name]
 
     Dg = make_grid_from_series(series, n_points=n_points)
+    if weight_profiles is not None:
+        unknown = set(weight_profiles) - {"FIMS", "UHSAS", "POPS", "APS"}
+        if unknown:
+            raise ValueError(f"Unknown weight-profile instruments: {sorted(unknown)}")
+        for name, item in zip(series_names, series):
+            if name in weight_profiles:
+                item["alpha"] = smooth_weight_profile(Dg, **weight_profiles[name])
 
     y_merged, wsum, diag = merge_sizedists_tikhonov_consensus(
         Dg,
@@ -2478,7 +2878,9 @@ def make_consensus_merged_spec(
         eps=1e-12,
         nonneg=True,
         c=c_punish,
+        use_consensus=use_consensus,
         data_space=data_space,
+        ignore_nonpositive_source=ignore_nonpositive_source,
     )
 
     Dg_edge = edges_from_mids_geometric(Dg)
@@ -3056,8 +3458,8 @@ def run_arcsix_merge_for_periods(
     apply_alignment = _validate_apply_alignment(apply_alignment, merge_instruments)
     include_pops = "POPS" in merge_instruments
     if include_pops and pops_ri_src is None:
-        # Match legacy production notebooks; callers may pass RI_POPS_SRC explicitly.
-        pops_ri_src = RI_UHSAS_SRC
+        # POPS and UHSAS have different calibration materials and source indices.
+        pops_ri_src = RI_POPS_SRC
 
     if not apply_alignment:
         if _temporal_regularization_enabled(

@@ -50,13 +50,14 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, moment="N", space="linear"):
     Parameters
     ----------
     x1, y1 : arrays
-        Mid diameters and spectrum 1 (same units as x2, y2).
+        Mid diameters in nm and spectrum 1 (same concentration units as y2).
     x2, y2 : arrays
         Mid diameters and spectrum 2.
     moment : {"N","S","V"}
         Weight by number (1), surface (π D^2), or volume ((π/6) D^3). D in μm.
     space : {"linear","log"}
-        Compute MSE in chosen space. Log requires positive values.
+        Compare absolute differences (linear) or log10 differences (log).
+        MSE means the average squared difference. Log requires positive values.
 
     Returns
     -------
@@ -76,6 +77,9 @@ def mse_overlap_sizedist(x1, y1, x2, y2, *, moment="N", space="linear"):
     npts = int(max(128, min(1024, x1.size, x2.size)))
     L = np.linspace(np.log10(lo), np.log10(hi), npts); D = 10.0**L
 
+    # These points are used only to score diameter alignment. They are not
+    # additional measurements for the later direct bin-total concentration fit.
+    # Interpolate heights against log diameter before applying moment/space.
     y1g = np.interp(L, np.log10(x1), y1)
     y2g = np.interp(L, np.log10(x2), y2)
 
@@ -119,13 +123,15 @@ def objective_opc_vs_ref(
 ):
     """
     Objective for optimizer. Remap OPC bin EDGES from m_src to trial m_dst = n+ik,
-    then remap dN/dlog10D by conserving bin counts, and compare to reference.
+    then adjust dN/dlog10D to conserve each bin's number concentration,
+    and compare to the reference.
 
     Returns the MSE between reference (D_ref, N_ref) and remapped OPC (Dm, Nm).
     """
     n, k = float(nk[0]), float(nk[1])
 
-    # 1) Map EDGE array via σ(D; m): edges' -> edges''
+    # Find the diameter at the trial refractive index that gives the same
+    # scattering signal as each original edge at the calibration index.
     edges_mapped = convert_do_lut(
         Do_nm=edges_DRV,
         ri_src=m_src,
@@ -134,7 +140,7 @@ def objective_opc_vs_ref(
         response_bins=response_bins,
     )
 
-    # 2) Remap spectrum from old edges -> new edges (number-conserving)
+    # A wider converted bin needs a lower height to keep its total unchanged.
     Nm = remap_dndlog_by_edges(edges_DRV, edges_mapped, y_DRV)
 
     # 3) Compare on mids of mapped edges
@@ -274,7 +280,8 @@ def _multi_custom_data_cost_and_flag(
         mids = mids_from_edges(edges_dst)
         curves.append((mids, y_dst))
 
-    # --- Accumulate cost vs reference (overlap-aware, weight-normalized) ---
+    # Compare only shared size ranges. Average their errors using the supplied
+    # comparison weights; these are separate from the final merge weights.
     cost_sum = 0.0
     weight_sum = 0.0
 
@@ -305,7 +312,8 @@ def _multi_custom_data_cost_and_flag(
                     weight_sum += w
 
     # Average by total weight of the comparisons that actually had overlap.
-    # If NOTHING overlapped, keep the old neutral behavior.
+    # With no overlap, return zero AND False. The zero means there was nothing
+    # to compare, not that the instruments matched perfectly.
     if weight_sum > 0.0:
         return float(cost_sum / weight_sum), True
     return 0.0, False
@@ -322,12 +330,13 @@ def objective_multi_custom(
     pair_weights: List[Tuple[int, int, float]] | None = None,  # optional list of (i, j, w)
 ) -> float:
     """
-    Compute a weighted sum of mismatch (MSE) terms between remapped instruments
+    Compute a weighted average of mismatch (MSE) terms between remapped instruments
     and a reference curve, plus optional cross-instrument pairwise terms.
 
     Cost function:
-        cost = sum_i  w_ref_i * MSE(remap(i), ref)
-             + sum_{(i,j) in pairs} w_ij * MSE(remap(i), remap(j))
+        numerator = sum_i w_ref_i * MSE(remap(i), ref)
+                  + sum_{(i,j) in pairs} w_ij * MSE(remap(i), remap(j))
+        cost = numerator / sum_of_weights_for_comparisons_with_overlap
 
     Instrument/reference and pair terms are skipped when their spectra do not
     overlap. If no real comparison contributes, this keeps the old neutral
@@ -386,6 +395,8 @@ def temporal_parameter_penalty(
 
 
 def _remap_one_instrument(edges, y, remap_fn: Callable, theta, kwargs):
+    # theta here means fitted parameters (RI or density), NOT a scattering angle.
+    # Resizing the edges changes dN/dlogD heights but preserves each bin's number.
     edges_src = np.asarray(edges, dtype=float)
     y_src = np.asarray(y, dtype=float)
     edges_dst = np.asarray(remap_fn(edges_src, np.asarray(theta, dtype=float), **dict(kwargs or {})), dtype=float)
@@ -460,6 +471,8 @@ def objective_joint_named_temporal(
             cost_sum += w * mse
             w_sum += w
 
+    # Normalize reference comparisons by contributing weight, so a missing
+    # overlap does not automatically shrink the cost as though it were a good fit.
     base = (cost_sum / w_sum) if w_sum > 0.0 else 0.0
     any_comparison = w_sum > 0.0
 
@@ -494,6 +507,9 @@ def objective_joint_named_temporal(
         d_po = n_po - float(prev[1])
         d_rho = rho - float(prev[2])
 
+        # The common legacy penalty and parameter-specific penalties ADD.
+        # These weights discourage jumps; they are not RI/density error bars.
+        # Density has different units, so do not reuse RI weights for density.
         tw = float(temporal_w)
         if tw != 0.0:
             base += tw * (d_uh * d_uh + d_po * d_po)
@@ -530,7 +546,7 @@ def optimize_multi_custom(
     seed: int = 123,
 ):
     """
-    Generic optimizer over heterogeneous instruments.
+    Fit diameter-conversion parameters for different instrument types together.
     You provide:
       - a single fixed reference curve (ref_mids, ref_y),
       - a list of instrument configs (edges, y, remap_fn, kwargs, w_ref),
@@ -555,8 +571,8 @@ def optimize_multi_custom(
               RI-based LUT mapping, aerodynamic conversions, etc.
     bounds_list : list of list of (lo, hi)
         For each instrument i, a list of (lo, hi) tuples, one per parameter of
-        theta_i. The product over i defines the full hyper-rectangle the
-        optimizer searches. Example:
+        theta_i. Each parameter can vary within its own lower and upper limit.
+        Example:
             bounds_list = [
                 [(1.3, 1.8), (0.0, 0.1)],        # theta_0 has 2 params
                 [(600.0, 2000.0), (0.8, 1.4)]    # theta_1 has 2 params
@@ -598,7 +614,7 @@ def optimize_multi_custom(
     - This function does not attempt to "know" instrument types. Whatever
       physics is required to map edges must be handled inside the user-supplied
       `remap_fn` and its kwargs.
-    - Count conservation is always enforced via `remap_dndlog_by_edges`.
+    - Bin number concentration is preserved via `remap_dndlog_by_edges`.
     - Overlap for MSE is computed on a geometric grid spanning the common range.
     """
     if len(instruments) != len(bounds_list):
@@ -632,7 +648,8 @@ def optimize_multi_custom(
 
     history = {"total": [], "data": [], "temporal": []}
 
-    # Closure passed to SciPy: maps x_vec -> scalar cost
+    # SciPy tries one list of parameter values at a time. These helpers turn
+    # that list into an alignment error and an optional time-smoothing penalty.
     def data_obj_with_flag(x_vec):
         return _multi_custom_data_cost_and_flag(
             x_vec, ref_mids, ref_y, instruments, param_slices,

@@ -1,4 +1,8 @@
-# sizedist_combine.py
+# Distribution combination: legacy interpolated fits and native-bin-total fits.
+# The current production path is merge_sizedists_bin_totals near the end of
+# this module. The interpolation functions remain for older callers/replays.
+# Their alpha arrays and lambda values have different meanings; do not swap
+# the two paths merely because both use Tikhonov (curvature) smoothing.
 # ----------------------------------------------------------------------
 # Global merge of particle size distributions using Tikhonov smoothing
 # on a nonuniform log-diameter grid, with nonnegative bounded LS solve.
@@ -11,7 +15,9 @@
 #   - compute_data_weights(diam_grid_nm, series_list, eps=1e-12)
 #
 # Each series in `series_list` is a dict:
-#   {"x": array_nm, "y": array, "sigma": array_or_None, "alpha": float_optional}
+#   {"x": array_nm, "y": array, "sigma": array_or_None, "alpha": scalar_or_grid_array}
+# alpha is an absolute per-instrument weight, not a pairwise weight. Arrays are
+# defined on the solver's diam_grid_nm, not on the instrument's native bins.
 #
 # Example (pseudocode):
 #   series = [
@@ -27,19 +33,53 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple, Optional, Any, Union
 import numpy as np
-from scipy.optimize import lsq_linear
+from scipy.optimize import lsq_linear, least_squares
+from scipy.special import logsumexp
 
 
 # ----------------------------- Interpolation ----------------------------- #
+
+def _source_mask(x, y, positive_only, preserve_zero_endpoint):
+    """Keep positive samples and the adjacent zero just outside their size range."""
+    if preserve_zero_endpoint not in (None, "first", "last"):
+        raise ValueError("preserve_zero_endpoint must be None, 'first', or 'last'")
+    valid = np.isfinite(x) & np.isfinite(y) & (x > 0)
+    if not positive_only:
+        return valid
+    keep = valid & (y > 0)
+    if preserve_zero_endpoint is not None:
+        # Work in diameter order without dropping missing/negative y values:
+        # only the immediate neighbour may be retained, never bridge over one.
+        indices = np.flatnonzero(np.isfinite(x) & (x > 0))
+        indices = indices[np.argsort(x[indices], kind="stable")]
+        positive = np.flatnonzero(keep[indices])
+        if positive.size:
+            neighbour = positive[0] - 1 if preserve_zero_endpoint == "first" else positive[-1] + 1
+            if 0 <= neighbour < indices.size:
+                index = indices[neighbour]
+                if valid[index] and y[index] == 0:
+                    keep[index] = True
+    return keep
+
 
 def log_interp(
     x_src_nm: np.ndarray,
     y_src: np.ndarray,
     x_dst_nm: np.ndarray,
+    *,
+    positive_only: bool = False,
+    preserve_zero_endpoint: Optional[str] = None,
 ) -> np.ndarray:
     """
     Interpolate y(x) from x_src_nm onto x_dst_nm using log10(x) as the axis.
     Values outside the source span in log-space are set to NaN.
+    With positive_only=True, omit nonpositive source values BEFORE interpolation.
+    Interpolate across omitted interior samples; do not extrapolate past the
+    remaining samples. preserve_zero_endpoint='first' or 'last' retains only an
+    exact zero immediately before the first positive sample or after the last
+    positive sample, respectively, as an interpolation anchor. Earlier/later
+    consecutive zeros are omitted.
+    Negative and missing values are never retained by this exception.
 
     Parameters
     ----------
@@ -65,7 +105,7 @@ def log_interp(
     if np.any(~np.isfinite(x_dst_nm)) or np.any(x_dst_nm <= 0):
         raise ValueError("x_dst_nm must be finite and > 0")
 
-    valid_src = np.isfinite(x_src_nm) & np.isfinite(y_src) & (x_src_nm > 0)
+    valid_src = _source_mask(x_src_nm, y_src, positive_only, preserve_zero_endpoint)
     if not np.any(valid_src):
         return np.full_like(x_dst_nm, np.nan, dtype=float)
 
@@ -117,8 +157,8 @@ def second_diff_nonuniform(log_grid: np.ndarray) -> Tuple[np.ndarray, np.ndarray
     if np.any(~np.isfinite(log_grid)) or not np.all(np.diff(log_grid) > 0):
         raise ValueError("second_diff_nonuniform: log_grid must be finite and strictly increasing.")
 
-    L = np.zeros((n_grid - 2, n_grid), float)
-    quad_w = np.zeros(n_grid - 2, float)
+    curvature_operator = np.zeros((n_grid - 2, n_grid), float)
+    integration_weights = np.zeros(n_grid - 2, float)
 
     # Interior nodes i = 1..n-2 (0-based indexing)
     for i in range(1, n_grid - 1):
@@ -131,12 +171,12 @@ def second_diff_nonuniform(log_grid: np.ndarray) -> Tuple[np.ndarray, np.ndarray
         coef_right = 2.0 / (h_right * (h_left + h_right))
 
         row = i - 1
-        L[row, i - 1] = coef_left
-        L[row, i] = coef_mid
-        L[row, i + 1] = coef_right
+        curvature_operator[row, i - 1] = coef_left
+        curvature_operator[row, i] = coef_mid
+        curvature_operator[row, i + 1] = coef_right
 
-        quad_w[row] = 0.5 * (h_left + h_right)  # local cell size for ∫(y'')^2 dt
-    return L, quad_w
+        integration_weights[row] = 0.5 * (h_left + h_right)  # local cell size for ∫(y'')^2 dt
+    return curvature_operator, integration_weights
 
 
 # ----------------------------- Grid utilities ----------------------------- #
@@ -219,7 +259,11 @@ def make_grid_from_series(
 
 def sigma_from_bands(y_lo: np.ndarray, y_hi: np.ndarray) -> np.ndarray:
     """
-    Convert lower/upper bands to a 1-sigma proxy: sigma = 0.5 * (y_hi - y_lo).
+    Return half the distance between lower and upper bounds.
+
+    This is one standard deviation only if the supplied bounds already mean
+    +/- one standard deviation in linear units. It does not infer a confidence
+    level or convert a two-standard-deviation band into a one-deviation band.
     """
     y_lo = np.asarray(y_lo, float)
     y_hi = np.asarray(y_hi, float)
@@ -228,13 +272,64 @@ def sigma_from_bands(y_lo: np.ndarray, y_hi: np.ndarray) -> np.ndarray:
 
 def fractional_sigma(y: np.ndarray, frac: float) -> np.ndarray:
     """
-    Fractional uncertainty proxy: sigma = |y| * frac.
+    Apply a caller-chosen relative uncertainty: sigma = |y| * frac.
+
+    For example, frac=0.2 gives 20% of each height. This assigns uncertainty;
+    it does not estimate it from measurements.
     """
     y = np.asarray(y, float)
     return np.abs(y) * float(frac)
 
 
 # ------------------------------- Data weighting ------------------------------- #
+
+def smooth_weight_profile(
+    diam_grid_nm: np.ndarray,
+    *,
+    start_nm: float,
+    end_nm: float,
+    start_weight: float,
+    end_weight: float,
+) -> np.ndarray:
+    """Return one instrument's smooth, absolute weight on a diameter grid.
+
+    The weight is constant below start_nm and above end_nm. Between those
+    limits it follows 3*t**2 - 2*t**3, where t is fractional log-diameter.
+    Both the weight and its slope are continuous at the endpoints. The
+    transition is monotonic and has no overshoot.
+
+    Use explicit, physically justified diameter limits in the same coordinate
+    as diam_grid_nm. Do not move the limits whenever a minute has a zero bin.
+    The function knows nothing about instrument names or pairs. Supply its
+    result as a series' alpha to either merge solver or compute_data_weights.
+    Weights are not normalized here: changing their total also changes the
+    strength of the data relative to the smoothness penalty.
+    """
+    grid = np.asarray(diam_grid_nm, float)
+    if grid.ndim != 1 or not grid.size or np.any(~np.isfinite(grid)) or np.any(grid <= 0):
+        raise ValueError("diam_grid_nm must be a non-empty, finite, positive 1D array")
+    bounds = np.asarray([start_nm, end_nm], float)
+    if np.any(~np.isfinite(bounds)) or not (0 < start_nm < end_nm):
+        raise ValueError("require finite 0 < start_nm < end_nm")
+    weights = np.asarray([start_weight, end_weight], float)
+    if np.any(~np.isfinite(weights)) or np.any(weights < 0):
+        raise ValueError("profile weights must be finite and nonnegative")
+    t = np.clip((np.log(grid) - np.log(start_nm)) / (np.log(end_nm) - np.log(start_nm)), 0., 1.)
+    blend = t * t * (3. - 2. * t)
+    return start_weight + (end_weight - start_weight) * blend
+
+
+def _weight_on_grid(alpha, grid: np.ndarray) -> np.ndarray:
+    """Accept a constant or an explicit weight at every solver-grid node."""
+    weight = np.asarray(alpha, float)
+    if weight.ndim == 0:
+        weight = np.full(grid.shape, float(weight))
+    elif weight.shape != grid.shape:
+        raise ValueError("alpha must be a scalar or a 1D array matching diam_grid_nm")
+    if np.any(~np.isfinite(weight)) or np.any(weight < 0):
+        raise ValueError("alpha weights must be finite and nonnegative")
+    return weight
+
 
 def compute_data_weights(
     diam_grid_nm: np.ndarray,
@@ -283,7 +378,7 @@ def compute_data_weights(
         x_nm = s["x"]
         y_vals = s["y"]
         sigma_vals = s.get("sigma", None)
-        alpha = float(s.get("alpha", 1.0))
+        alpha = _weight_on_grid(s.get("alpha", 1.0), diam_grid_nm)
 
         y_on_grid = log_interp(x_nm, y_vals, diam_grid_nm)
 
@@ -295,7 +390,7 @@ def compute_data_weights(
 
         valid = np.isfinite(y_on_grid) & np.isfinite(inv_var_on_grid)
         eff_weight = np.zeros(n, float)
-        eff_weight[valid] = alpha * inv_var_on_grid[valid]
+        eff_weight[valid] = alpha[valid] * inv_var_on_grid[valid]
         weights_per_series.append(eff_weight)
 
     weight_sum = np.sum(weights_per_series, axis=0)
@@ -314,8 +409,10 @@ def merge_sizedists_tikhonov(
     nonneg: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """
-    Merge multiple size distributions on a common grid with a Tikhonov curvature
-    penalty in log-diameter.
+    Legacy merge: interpolate instrument curves onto a common diameter grid,
+    then fit their heights with a penalty for bending between neighboring points.
+    This is Tikhonov smoothing. It does not fit measured bin totals directly;
+    use merge_sizedists_bin_totals for that calculation.
 
     Minimizes (in stacked least-squares form):
         || D^{1/2} (M - ybar) ||_2^2 + || sqrt(lam) * Wc^{1/2} L M ||_2^2
@@ -346,7 +443,7 @@ def merge_sizedists_tikhonov(
         x_nm       = np.asarray(s["x"], float)
         y_vals     = np.asarray(s["y"], float)
         sigma_vals = s.get("sigma", None)
-        alpha      = float(s.get("alpha", 1.0))
+        alpha      = _weight_on_grid(s.get("alpha", 1.0), diam_grid_nm)
 
         y_on_grid = log_interp(x_nm, y_vals, diam_grid_nm)
 
@@ -358,7 +455,7 @@ def merge_sizedists_tikhonov(
 
         valid = np.isfinite(y_on_grid) & np.isfinite(inv_var_on_grid)
         eff_weight = np.zeros(n_grid, float)
-        eff_weight[valid] = alpha * inv_var_on_grid[valid]
+        eff_weight[valid] = alpha[valid] * inv_var_on_grid[valid]
 
         weighted_sum_y += eff_weight * np.nan_to_num(y_on_grid, nan=0.0)
         weight_sum     += eff_weight
@@ -374,8 +471,9 @@ def merge_sizedists_tikhonov(
     ybar = np.zeros_like(weighted_sum_y)
     sqrt_weight_data = np.zeros_like(weight_sum)
 
-    # Only define ybar, sqrt_weight_data where we have data;
-    # elsewhere these stay 0 => rows contribute nothing to the LS system.
+    # A zero here is only a placeholder. Its weight is also zero, so a gap
+    # does not tell the fit that concentration should be zero. The smoothness
+    # penalty connects the fit across those unmeasured points.
     ybar[data_mask] = weighted_sum_y[data_mask] / np.maximum(weight_sum[data_mask], tiny)
     sqrt_weight_data[data_mask] = np.sqrt(np.maximum(weight_sum[data_mask], tiny))
 
@@ -387,7 +485,8 @@ def merge_sizedists_tikhonov(
     A_smooth_matrix  = np.sqrt(lam) * (np.sqrt(quad_w)[:, None] * L_smooth)
     rhs_smooth       = np.zeros(L_smooth.shape[0], float)
 
-    # Stack data + smoothness
+    # Solve both requirements together: stay close to measurements, while
+    # avoiding excessive bending. lam controls the strength of the second part.
     A_stacked   = np.vstack([A_data_matrix, A_smooth_matrix])
     rhs_stacked = np.concatenate([rhs_data, rhs_smooth])
 
@@ -427,13 +526,15 @@ def merge_sizedists_tikhonov_consensus(
     nonneg: bool = True,
     min_overlap: int = 3,
     c: float = 2.5,
+    use_consensus: bool = True,
     eps_scale: float = 1e-12,
     data_space: str = "linear",   # "linear" or "log10"
+    ignore_nonpositive_source: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """
     Like merge_sizedists_tikhonov, but with a per-grid-node "consensus/voting" reweighting.
 
-    NEW:
+    Choice of fitted height:
     - data_space="linear": do everything in linear y
     - data_space="log10": do everything in log10(y), then convert merged back to linear y
 
@@ -443,6 +544,22 @@ def merge_sizedists_tikhonov_consensus(
           sigma_log10 = sigma / (y * ln(10))
       Only where y > 0 and sigma > 0; otherwise ignored.
     - nonneg bound is ignored in log10 mode (since 10**Z is always positive).
+
+    alpha may be a nonnegative scalar or an array on diam_grid_nm. Its value
+    multiplies the separate agreement and optional uncertainty weights; it is
+    not a guaranteed final share. A zero-weight series does not vote.
+
+    Set use_consensus=False to use only the base weights (including any
+    supplied uncertainty weights), with no agreement adjustment. The grid,
+    interpolation and Tikhonov smoothing are identical; c is unused.
+
+    Set ignore_nonpositive_source=True to omit nonpositive native samples
+    before interpolation, avoiding artificial dips around zero source bins.
+    Interior gaps are interpolated across; endpoints are not extrapolated.
+    Each series may set preserve_zero_endpoint='first' or 'last' to keep an
+    zero immediately outside the positive-data range during interpolation. In log10 mode,
+    a resulting exact zero still has no fitting weight; no positive floor is added.
+    The default False preserves the historical calculation for replay.
     """
     if data_space not in ("linear", "log10"):
         raise ValueError(f"data_space must be 'linear' or 'log10', got: {data_space!r}")
@@ -482,10 +599,18 @@ def merge_sizedists_tikhonov_consensus(
         x_nm       = np.asarray(s["x"], float)
         y_vals     = np.asarray(s["y"], float)
         sigma_vals = s.get("sigma", None)
-        alpha      = float(s.get("alpha", 1.0))
+        alpha      = _weight_on_grid(s.get("alpha", 1.0), diam_grid_nm)
 
-        y_on_grid = log_interp(x_nm, y_vals, diam_grid_nm)
+        y_on_grid = log_interp(x_nm, y_vals, diam_grid_nm,
+                               positive_only=ignore_nonpositive_source,
+                               preserve_zero_endpoint=s.get('preserve_zero_endpoint'))
         Y_lin[i, :] = y_on_grid
+        if sigma_vals is not None and ignore_nonpositive_source:
+            sigma_vals = np.asarray(sigma_vals, float)
+            if sigma_vals.shape != y_vals.shape:
+                raise ValueError("sigma must have the same shape as source y")
+            keep = _source_mask(x_nm, y_vals, True, s.get('preserve_zero_endpoint'))
+            sigma_vals = np.where(keep, sigma_vals, np.nan)
 
         if data_space == "linear":
             # ---- fit in linear y ----
@@ -493,12 +618,12 @@ def merge_sizedists_tikhonov_consensus(
 
             if sigma_vals is None:
                 valid = np.isfinite(y_on_grid)
-                W_base[i, valid] = alpha * 1.0
+                W_base[i, valid] = alpha[valid]
             else:
                 sigma_on_grid = log_interp(x_nm, np.asarray(sigma_vals, float), diam_grid_nm)
                 inv_var = 1.0 / (np.square(sigma_on_grid) + eps)
                 valid = np.isfinite(y_on_grid) & np.isfinite(inv_var)
-                W_base[i, valid] = alpha * inv_var[valid]
+                W_base[i, valid] = alpha[valid] * inv_var[valid]
 
         else:
             # ---- fit in log10(y); ignore y<=0 by treating as missing ----
@@ -510,7 +635,7 @@ def merge_sizedists_tikhonov_consensus(
 
             if sigma_vals is None:
                 valid = np.isfinite(ylog)
-                W_base[i, valid] = alpha * 1.0
+                W_base[i, valid] = alpha[valid]
             else:
                 sigma_on_grid = log_interp(x_nm, np.asarray(sigma_vals, float), diam_grid_nm)
 
@@ -522,17 +647,17 @@ def merge_sizedists_tikhonov_consensus(
 
                 inv_var = 1.0 / (np.square(sigma_log) + eps)
                 valid = np.isfinite(ylog) & np.isfinite(inv_var)
-                W_base[i, valid] = alpha * inv_var[valid]
+                W_base[i, valid] = alpha[valid] * inv_var[valid]
 
     # ---- consensus weights per node ----
     W_cons = np.ones((n_series, n_grid), float)
 
     for j in range(n_grid):
         yj = Y_use[:, j]
-        valid = np.isfinite(yj)
+        valid = np.isfinite(yj) & (W_base[:, j] > 0)
         m = int(np.sum(valid))
-        if m < min_overlap:
-            # not enough overlap -> no extra consensus downweighting
+        if not use_consensus or m < min_overlap:
+            # Disabled or insufficient overlap: base weights only.
             W_cons[:, j] = np.where(valid, 1.0, 0.0)
             continue
 
@@ -609,8 +734,10 @@ def merge_sizedists_tikhonov_consensus(
     diagnostics = {
         "support_mask": data_mask,
         "data_space": data_space,
+        "ignore_nonpositive_source": ignore_nonpositive_source,
         "W_base": W_base,
         "W_consensus": W_cons,
+        "use_consensus": bool(use_consensus),
         "W_effective": W_eff,
         "y_on_grid_linear": Y_lin,
         "y_on_grid_solver": Y_use,
@@ -624,6 +751,296 @@ def merge_sizedists_tikhonov_consensus(
     return merged_vals, weight_sum, diagnostics
 
 
+def bin_overlap_matrix(measured_edges_nm, model_edges_nm):
+    """Log-diameter widths shared by each measured bin and each model bin.
+
+    Multiplying this matrix by model dN/dlog10D gives measured-bin number
+    predictions. This integrates a piecewise-constant model; it does not
+    interpolate the measurements or assign additional independent observations.
+    """
+    arrays = [np.asarray(bin_edges, float) for bin_edges in (measured_edges_nm, model_edges_nm)]
+    for bin_edges in arrays:
+        if (bin_edges.ndim != 1 or bin_edges.size < 2 or np.any(~np.isfinite(bin_edges))
+                or np.any(bin_edges <= 0) or np.any(np.diff(bin_edges) <= 0)):
+            raise ValueError('Bin edges must be finite, positive, and strictly increasing')
+    measured_log_edges, model_log_edges = (np.log10(bin_edges) for bin_edges in arrays)
+    # For each measured/model bin pair, find the width they share in log diameter.
+    # Non-overlapping bins contribute zero. Width times model height gives the
+    # predicted number concentration in that shared part of the measured bin.
+    return np.maximum(
+        0.,
+        np.minimum(measured_log_edges[1:, None], model_log_edges[None, 1:])
+        - np.maximum(measured_log_edges[:-1, None], model_log_edges[None, :-1]),
+    )
+
+
+def _bin_total_system(log_height, log_overlap, log_number, sqrt_weight, smooth, zero_number_scale=None):
+    """Log residuals for positives; optional scaled linear residuals for zeros.
+
+    A positive entry in zero_number_scale identifies a measured zero. Its
+    residual is predicted_number / (scale * ln(10)), NOT log(predicted/epsilon).
+    The ln(10) gives the same local sensitivity as a positive log residual at
+    predicted_number=scale. Scale sets a fitting weight, not a detection limit
+    or a claimed measurement uncertainty. Zero entries retain the original
+    positive-bin calculation exactly.
+    """
+    # Predict measured-bin totals by adding the contributions from model bins.
+    # Do the sum in log space because the optimizer may try very large heights.
+    # logsumexp uses natural logs, so convert our log10 heights with ln(10).
+    # Zero overlap is stored as -inf and contributes nothing to the sum.
+    terms = log_overlap + np.log(10.)*log_height[None, :]
+    log_pred = logsumexp(terms, axis=1)
+    data_error = log_pred/np.log(10.)-log_number
+    # Tell the optimizer how changing each model height changes the fitting error.
+    # These derivatives let it choose a direction without trying every change.
+    data_derivative = np.exp(terms-log_pred[:, None])
+    if zero_number_scale is not None:
+        is_zero = zero_number_scale > 0
+        log_scale = np.log(zero_number_scale[is_zero])
+        data_error[is_zero] = np.exp(log_pred[is_zero]-log_scale)/np.log(10.)
+        data_derivative[is_zero] = np.exp(terms[is_zero]-log_scale[:, None])
+    residual = np.r_[sqrt_weight*data_error, smooth@log_height]
+    jacobian = np.vstack([sqrt_weight[:, None]*data_derivative, smooth])
+    return residual, jacobian, log_pred/np.log(10.)
+
+
+def native_bin_consensus_multipliers(series_list, c=2.0):
+    """Agreement multipliers averaged over each native bin, without interpolation.
+
+    On intervals formed by the union of native edges, compare positive bin
+    average heights from at least three instruments in log10 space. Apply
+    exp(-0.5*((log_height-median)/(1.4826*MAD*c))**2), then average over each
+    native bin by log-diameter width. MAD is median absolute deviation from
+    the median. Larger c weakens suppression. Intervals with fewer than three
+    positive instruments keep multiplier one. A 1e-12 floor prevents removing
+    observations or changing output support. No consensus smoothing is used.
+    """
+    if not np.isfinite(c) or c <= 0 or not series_list:
+        raise ValueError('Need positive finite c and at least one native series')
+    names = [series.get('name', str(i)) for i, series in enumerate(series_list)]
+    if len(names) != len(set(names)):
+        raise ValueError('Consensus requires unique instrument names')
+    for series in series_list:
+        native_edges = np.asarray(series['edges'], float)
+        bin_overlap_matrix(native_edges, native_edges)
+        if np.asarray(series['number']).shape != (len(native_edges)-1,):
+            raise ValueError('One number is required per native bin')
+    # Split only for comparing agreement. These intervals do not become new
+    # observations or adjustable model bins in the final fit.
+    edges = np.unique(np.concatenate([series['edges'] for series in series_list]))
+    interval_midpoints = np.sqrt(edges[:-1]*edges[1:])
+    interval_widths = np.diff(np.log10(edges))
+    values = np.full((len(series_list), len(interval_midpoints)), np.nan)
+    indices = []
+    for instrument_index, series in enumerate(series_list):
+        native_edges = np.asarray(series['edges'], float)
+        native_indices = np.searchsorted(native_edges, interval_midpoints, side='right')-1
+        indices.append(native_indices)
+        valid = (native_indices >= 0) & (native_indices < len(native_edges)-1)
+        height = np.asarray(series['number'], float)/np.diff(np.log10(native_edges))
+        values[instrument_index, valid] = height[native_indices[valid]]
+    weights = np.ones_like(values)
+    for j in range(len(interval_midpoints)):
+        valid = np.isfinite(values[:, j]) & (values[:, j] > 0)
+        if valid.sum() < 3:
+            continue
+        logs = np.log10(values[valid, j])
+        median = np.median(logs)
+        scale = max(1.4826*np.median(abs(logs-median)), 1e-12)
+        weights[valid, j] = np.maximum(np.exp(-.5*((logs-median)/(scale*c))**2), 1e-12)
+    # Average the agreement factors back to ONE multiplier per native bin.
+    # Weight by log width so a tiny overlap does not represent the entire bin.
+    result = []
+    for instrument_index, series in enumerate(series_list):
+        native_indices = indices[instrument_index]
+        native_bin_count = len(series['number'])
+        valid = (native_indices >= 0) & (native_indices < native_bin_count)
+        total = np.bincount(
+            native_indices[valid],
+            weights=interval_widths[valid] * weights[instrument_index, valid],
+            minlength=native_bin_count,
+        )
+        result.append(total/np.diff(np.log10(series['edges'])))
+    return result
+
+
+def merge_sizedists_bin_totals(output_edges_nm, series_list, *, lam, max_nfev=300):
+    """Fit native-bin number totals on fixed output bins, without input interpolation.
+
+    Each series supplies ``edges`` (converted diameter edges), ``number``
+    (measured number per bin, cm-3), optional ``name`` and ``alpha``. Alpha is
+    a nonnegative scalar or one value per NATIVE bin, not per output-grid node.
+    Diameter conversion remains a separate step that preserves these totals.
+
+    Fit log10(model dN/dlog10D), comparing log10(predicted/measured bin number).
+    Each squared data residual has weight alpha*Delta(log10 D). The bin-width
+    factor limits dependence on native channel count, but is not an uncertainty
+    model. Penalize curvature of log10(dN/dlog10D) versus log10(D), integrated
+    over diameter using second_diff_nonuniform. Because the previous method
+    sums unscaled grid-point residuals, its numerical lambda is NOT equivalent.
+
+    By default zero/negative/nonfinite number bins are omitted. A series may
+    opt into zero_endpoint='first' or 'last' to retain ONLY the zero immediately
+    before its first positive bin or after its last positive bin. Never bridge
+    missing/negative bins or retain further consecutive zeros. This option
+    requires zero_number_scale (positive scalar or one value per native bin).
+    The retained zero's error is predicted_number/(scale*ln(10)), a scaled
+    linear error; the measurement remains exactly zero. A transparent local
+    scale is the neighboring positive mean height times the zero bin's log
+    width. It is a weighting choice, NOT a counting-uncertainty model. No floor,
+    interpolation anchors, forced zero output, or Poisson likelihood is used.
+    Entire retained bins intersecting the requested range are fitted, including parts
+    outside it; auxiliary model bins cover those parts. Output edges NEVER
+    change. Keep the fitted height in every output bin overlapping the outer
+    retained-data range, including at most one partly covered bin at either end.
+    Do not dilute heights by coverage. Entirely outside bins are NaN, and a bin
+    that only touches the measurement boundary is outside. The fitted height
+    extends across a retained partial bin; its unmeasured portion is an estimate.
+    Coverage fractions are diagnostic only, not concentration weights.
+    Internal unsupported gaps are inferred by smoothness and marked in diagnostics.
+    This function does not calculate consensus or update alignment. Callers can
+    include previously calculated consensus multipliers in the supplied alpha.
+
+    One adjustable log-height is fitted per model bin.
+    """
+    edges = np.asarray(output_edges_nm, float)
+    bin_overlap_matrix(edges, edges)  # Validate once before using logarithms.
+    if edges.size < 4 or not series_list:
+        raise ValueError('Need at least three output bins and one input series')
+    if not np.isfinite(lam) or lam < 0 or max_nfev < 1:
+        raise ValueError('lambda must be nonnegative and max_nfev positive')
+    # Keep the order of rows and used identical: uncertainty propagation and
+    # saved diagnostics use (instrument name, native index) to identify each row.
+    rows = []
+    used = []
+    omitted = []
+    for series_index, item in enumerate(series_list):
+        native_edges = np.asarray(item['edges'], float)
+        bin_overlap_matrix(native_edges, edges)
+        measured_numbers = np.asarray(item['number'], float)
+        if measured_numbers.ndim != 1 or measured_numbers.size != native_edges.size-1:
+            raise ValueError('One measured number is required per native bin')
+        native_weights = np.asarray(item.get('alpha', 1.), float)
+        if native_weights.ndim == 0:
+            native_weights = np.full_like(measured_numbers, float(native_weights))
+        if (native_weights.shape != measured_numbers.shape
+                or np.any(~np.isfinite(native_weights)) or np.any(native_weights < 0)):
+            raise ValueError('alpha must be nonnegative, scalar or one value per native bin')
+        keep = (
+            np.isfinite(measured_numbers) & (measured_numbers > 0)
+            & (native_weights > 0)
+            & (native_edges[:-1] < edges[-1]) & (native_edges[1:] > edges[0])
+        )
+        endpoint = item.get('zero_endpoint')
+        zero_scale = np.zeros_like(measured_numbers)
+        if endpoint not in (None, 'first', 'last'):
+            raise ValueError("zero_endpoint must be None, 'first', or 'last'")
+        if endpoint is not None:
+            scale = np.asarray(item.get('zero_number_scale', np.nan), float)
+            if scale.ndim == 0:
+                scale = np.full_like(measured_numbers, float(scale))
+            if scale.shape != measured_numbers.shape or np.any(~np.isfinite(scale)) or np.any(scale <= 0):
+                raise ValueError('zero_number_scale must be positive, scalar or one value per native bin')
+            positives = np.flatnonzero(np.isfinite(measured_numbers) & (measured_numbers > 0))
+            if positives.size:
+                i = positives[0]-1 if endpoint == 'first' else positives[-1]+1
+                if (0 <= i < measured_numbers.size and measured_numbers[i] == 0 and native_weights[i] > 0
+                        and native_edges[i] < edges[-1] and native_edges[i+1] > edges[0]):
+                    keep[i] = True
+                    zero_scale[i] = scale[i]
+        name = item.get('name', str(series_index))
+        omitted.append({'name': name, 'total_bins': int(measured_numbers.size), 'used_bins': int(keep.sum()),
+                        'zero_bins': int((measured_numbers == 0).sum()),
+                        'retained_zero_bins': int((zero_scale > 0).sum())})
+        for i in np.flatnonzero(keep):
+            rows.append((native_edges[i], native_edges[i+1], measured_numbers[i],
+                         native_weights[i], zero_scale[i]))
+            used.append((name,int(i)))
+    if not rows:
+        raise ValueError('No positive measured-bin totals in the requested diameter range')
+    lower,upper,number,alpha,zero_scale = np.asarray(rows).T
+    if not np.any(number > 0):
+        raise ValueError('Need positive measured-bin totals to accompany retained zeros')
+    # A measured bin may extend beyond the requested output range. Add temporary
+    # model bins so we still fit its whole measured total. These extra bins are
+    # removed from the returned result; the user's output edges do not change.
+    log_edges = np.log10(edges)
+    step = np.median(np.diff(log_edges))
+    left = max(0,int(np.ceil((log_edges[0]-np.log10(lower.min()))/step)))
+    right = max(0,int(np.ceil((np.log10(upper.max())-log_edges[-1])/step)))
+    model_edges = np.r_[10**(log_edges[0]-step*np.arange(left,0,-1)),edges,
+                        10**(log_edges[-1]+step*np.arange(1,right+1))]
+    # One row per retained measurement, one column per model height. Multiplying
+    # overlap_matrix @ model_height predicts whole measured-bin totals.
+    overlap_matrix = np.maximum(0., np.minimum(np.log10(upper)[:,None],np.log10(model_edges[1:])[None,:])
+                   - np.maximum(np.log10(lower)[:,None],np.log10(model_edges[:-1])[None,:]))
+    widths = np.log10(upper/lower)
+    np.testing.assert_allclose(overlap_matrix.sum(axis=1),widths,rtol=1e-10,atol=1e-12)
+    with np.errstate(divide='ignore'):
+        log_overlap = np.log(overlap_matrix)
+    sqrt_weight = np.sqrt(alpha*widths)
+    mids_log = (np.log10(model_edges[:-1])+np.log10(model_edges[1:]))/2
+    # Penalize bends in the fitted log distribution. Account for bin spacing:
+    # the same change over a narrow diameter interval is a sharper bend.
+    curvature_operator, integration_weights = second_diff_nonuniform(mids_log)
+    smooth = np.sqrt(lam*integration_weights)[:,None]*curvature_operator
+    # Start from overlapping native-bin averages, not interpolated observations.
+    start_weight = overlap_matrix.T*alpha[None,:]
+    denominator = start_weight.sum(axis=1)
+    # The optimizer needs a positive starting height even near a measured zero.
+    # Use the zero-bin scale for that starting guess only; its target stays zero.
+    initial_log_height = np.log10(np.where(number > 0, number, zero_scale)/widths)
+    initial_log_heights = np.full(model_edges.size-1,np.median(initial_log_height))
+    supported = denominator > 0
+    initial_log_heights[supported] = (start_weight@initial_log_height)[supported]/denominator[supported]
+    log_number = np.log10(np.where(number > 0, number, 1.))  # Zero rows are overridden.
+    def residual(log_height):
+        return _bin_total_system(log_height, log_overlap, log_number, sqrt_weight, smooth, zero_scale)[0]
+
+    def jacobian(log_height):
+        return _bin_total_system(log_height, log_overlap, log_number, sqrt_weight, smooth, zero_scale)[1]
+
+    result = least_squares(residual,initial_log_heights,jac=jacobian,max_nfev=max_nfev,
+                           ftol=1e-9,xtol=1e-9,gtol=1e-9,method='trf')
+    if not result.success:
+        raise RuntimeError(f'Bin-total fit did not converge: {result.message}')
+    fitted_log_y = result.x
+    model_height = 10**fitted_log_y
+    if not np.all(np.isfinite(model_height) & (model_height > 0)):
+        raise RuntimeError('Bin-total fit returned nonfinite or nonpositive model values')
+    # Keep the user's fixed output edges and the fitted height. Permit only
+    # the one boundary-straddling bin at each end; never dilute its height
+    # or extend the curve into a further bin with no measurement overlap.
+    covered_width = np.maximum(0., np.minimum(log_edges[1:], np.log10(upper.max()))
+                               - np.maximum(log_edges[:-1], np.log10(lower.min())))
+    coverage_fraction = np.clip(covered_width / np.diff(log_edges), 0., 1.)
+    overlaps_range = (edges[:-1] < upper.max()) & (edges[1:] > lower.min())
+    y = model_height[left:left+edges.size-1].copy()
+    y[~overlaps_range] = np.nan
+    coverage = np.isclose(coverage_fraction, 1., rtol=0., atol=1e-12)
+    predicted = overlap_matrix@model_height
+    log_error = np.full_like(number, np.nan)
+    positive = number > 0
+    log_error[positive] = np.log10(predicted[positive]/number[positive])
+    data_error = log_error.copy()
+    data_error[~positive] = predicted[~positive]/(zero_scale[~positive]*np.log(10.))
+    diagnostics = {'method':'native-bin-totals-log10-v1-experimental', 'lambda':float(lam),
+        'parameter_count':int(result.x.size),
+        'measured_number':number,'predicted_number':predicted,'used_bins':used,'omitted':omitted,
+        'bin_weight':alpha*widths,'log_residual':log_error,
+        'zero_number_scale':zero_scale,'data_residual':data_error,
+        'zero_policy':'adjacent-explicit-scaled-linear' if np.any(~positive) else 'omit-all',
+        'data_loss':float(np.sum(alpha*widths*data_error**2)),
+        'roughness':float(np.sum(integration_weights*(curvature_operator@fitted_log_y)**2)),
+        'model_edges_nm':model_edges,'model_dNdlogDp':model_height,
+        'output_full_range_coverage':coverage,
+        'output_coverage_fraction':coverage_fraction,
+        'output_direct_support':supported[left:left+edges.size-1],
+        'nfev':int(result.nfev),'optimality':float(result.optimality),
+        'solver_message':str(result.message)}
+    return y, diagnostics
+
+
 # ------------------------------ Module metadata ------------------------------ #
 
 
@@ -634,6 +1051,10 @@ __all__ = [
     "sigma_from_bands",
     "fractional_sigma",
     "compute_data_weights",
+    "smooth_weight_profile",
     "merge_sizedists_tikhonov",
     "merge_sizedists_tikhonov_consensus",
+    "bin_overlap_matrix",
+    "merge_sizedists_bin_totals",
+    "native_bin_consensus_multipliers",
 ]

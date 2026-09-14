@@ -5,18 +5,21 @@ LUT building: setup_csca -> geometry weights -> Mie intensities -> cross-section
 
 Human-readable instrument settings live in opc_setups/*.toml. Optical geometry
 and validation are in optical_geometry; LUT storage/building is in optical_lut.
-Old imports from this module remain supported.
+Import settings from optical_geometry and table readers/builders from optical_lut.
 """
 from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass
 import numpy as np
-from joblib import Parallel, delayed
 from sklearn.isotonic import IsotonicRegression
 from scipy.interpolate import PchipInterpolator
 
 def _configure_miepython_jit() -> None:
+    """Allow Mie calculations to use compiled code, unless the user opted out."""
+    # miepython reads these settings when it is imported, so configure it first.
+    # setdefault leaves an explicit user setting alone. Numba is the optional
+    # compiler that speeds up repeated numerical calculations.
     os.environ.setdefault("MIEPYTHON_USE_JIT", "1")
     os.environ.setdefault("NUMBA_CACHE_DIR", tempfile.gettempdir())
 
@@ -24,21 +27,11 @@ def _configure_miepython_jit() -> None:
 _configure_miepython_jit()
 import miepython as mie
 
-from .optical_geometry import (
-    CollectionCone, CollectionChannel, IncidentBeam, OpticalSetup,
-    channel_azimuth_weights, load_optical_setup,
-    POPSGeom, UHSASGeom, PCASPGeom,
-    pops_optical_setup, uhsas_optical_setup, pcasp_optical_setup,
-    las_uhsas_proxy_setup, optical_setup_from_lut_metadata,
-    POPS_WAVELENGTH_NM, UHSAS_WAVELENGTH_NM, PCASP_WAVELENGTH_NM,
-    RI_POPS_SRC, RI_UHSAS_SRC, OPTICAL_MODEL_VERSION,
-)
+from .optical_geometry import OpticalSetup, channel_azimuth_weights
+from typing import TYPE_CHECKING
 
-from .optical_lut import (
-    SigmaLUT, sigma_query_zarr, build_sigma_lut, build_setup_sigma_lut,
-    build_pcasp_sigma_lut, build_pops_sigma_lut, build_uhsas_sigma_lut,
-    DEFAULT_D_RANGE, DEFAULT_N_RANGE, DEFAULT_K_VALUES, DEFAULT_CHUNKS,
-)
+if TYPE_CHECKING:
+    from .optical_lut import SigmaLUT
 
 # Main calculations: read these first.
 
@@ -81,7 +74,8 @@ def convert_do_lut(
     if np.any(Do_nm <= 0) or not np.all(np.diff(Do_nm) > 0):
         raise ValueError("Do_nm must be strictly increasing and > 0")
 
-    # build monotone σ maps on LUT grid
+    # Read both responses at the same LUT diameters. sigma_curve interpolates
+    # in refractive index as needed; it does not run a new Mie calculation.
     Dg = np.asarray(lut.Dg, float)
     ns, ks = float(np.real(ri_src)), float(np.imag(ri_src))
     nd, kd = float(np.real(ri_dst)), float(np.imag(ri_dst))
@@ -90,22 +84,30 @@ def convert_do_lut(
 
     if source_sigma_fn is None:
         sigma_src = lut.sigma_curve(Dg, ns, ks)
+        # We need only the forward function for the calibration material:
+        # what signal would its reported diameter produce?
         f_src_sigma, _ = make_monotone_sigma_interpolator(
             Dg, sigma_src, response_bins=response_bins, increasing=True
         )
     else:
+        # During alignment, the calibration material stays the same. The caller
+        # can build its response once rather than repeat this smoothing each try.
         f_src_sigma = source_sigma_fn
 
+    # For the assumed material we need the opposite direction: which diameter
+    # produces that signal? This function searches the same smoothed curve.
     _, D_of_sigma_dst = make_monotone_sigma_interpolator(
         Dg, sigma_dst, response_bins=response_bins, increasing=True
     )
 
-    # map D -> σ (at ri_src)
+    # Convert every input bin edge to a signal under the calibration RI.
     sigma_edges = f_src_sigma(Do_nm)
     if not np.all(np.isfinite(sigma_edges)) or np.any(sigma_edges <= eps):
         raise ValueError("Non-finite or non-positive σ encountered; check LUT and monotone fit.")
 
-    # invert σ -> D' (at ri_dst)
+    # Keep those signals unchanged and find their diameters under the new RI.
+    # No concentration is changed here; the caller preserves each bin's total
+    # when it adjusts the height for the new bin width.
     Do_nm_new = D_of_sigma_dst(sigma_edges)
     Do_nm_new = np.asarray(Do_nm_new, float)
 
@@ -132,6 +134,9 @@ def setup_csca(D_nm, m_particle, setup: OpticalSetup, *, _cache=None):
     diameters = np.atleast_1d(D_nm).astype(float)
     if diameters.ndim != 1 or np.any(~np.isfinite(diameters)) or np.any(diameters <= 0):
         raise ValueError("D_nm must be 1D, finite and positive")
+    # A cache holds the accepted angles and polarization weights, not Mie
+    # results. It can be reused for other sizes and refractive indices, but
+    # must have been built from this same setup, including its angular spacing.
     caches = setup_geometry_cache(setup) if _cache is None else _cache
     result = {}
     evaluated = []
@@ -146,11 +151,17 @@ def setup_csca(D_nm, m_particle, setup: OpticalSetup, *, _cache=None):
                     spectrum = previous_spectrum
                     break
             if spectrum is None:
+                # Each call integrates the light from one particle size into
+                # this detector for this beam. The returned area is in um².
                 spectrum = np.array([
                     _collected_cross_section(d, m_particle, setup.wavelength_nm, cache)
                     for d in diameters])
                 evaluated.append((cache, spectrum))
+            # These fractions refer to total laser irradiance. For two equal
+            # beams each contributes half, so we do not add a factor of two.
             values += beam.irradiance_fraction * spectrum
+        # Keep detectors separate. The LUT builder or analysis must choose the
+        # detector it needs, rather than silently adding all collection arms.
         result[channel.name] = values
     return result
 
@@ -164,6 +175,9 @@ def _collected_cross_section(D_nm, m_particle, wavelength_nm, cache):
     They already describe intensity: do not square them again or halve them.
     """
     size_parameter = np.pi * D_nm / wavelength_nm
+    # Evaluate scattering at cos(theta), the angular coordinate expected by
+    # miepython. With norm="qsca", the full-sphere integral of P11 is Qsca;
+    # this is why the final area factor below is the particle's projected area.
     phase_matrix = mie.phase_matrix(m_particle, size_parameter, cache.mu, norm="qsca")
     perpendicular = phase_matrix[0, 0, :] - phase_matrix[0, 1, :]
     parallel = phase_matrix[0, 0, :] + phase_matrix[0, 1, :]
@@ -171,6 +185,8 @@ def _collected_cross_section(D_nm, m_particle, wavelength_nm, cache):
     # accepted azimuths. Only sin(theta) dtheta remains of the solid angle.
     phi_integral = perpendicular * cache.perp_phi + parallel * cache.parallel_phi
     integrand = phi_integral * np.sin(cache.theta_rad)
+    # The trapezoidal rule adds the area under the sampled angular curve.
+    # Both branches use the same rule; Numba only accelerates the loop.
     integral = (_trapz_numba(integrand, cache.theta_rad) if _HAVE_NUMBA
                 else np.trapezoid(integrand, cache.theta_rad))
     radius_um = 0.5 * D_nm * 1e-3
@@ -196,6 +212,8 @@ def directional_cross_section(D_nm, m_particle, setup: OpticalSetup, directions)
     flat = directions.reshape(-1, 3)
     total = np.zeros(len(flat))
     for beam in setup.beams:
+        # The dot product of unit directions is cos(theta). Clipping removes
+        # possible roundoff outside [-1, 1], not any physical scattering angles.
         cos_theta = np.clip(flat @ beam.direction, -1., 1.)
         phase_matrix = mie.phase_matrix(m_particle, np.pi*D_nm/setup.wavelength_nm, cos_theta, norm="qsca")
         # Each outgoing ray and the beam define their own scattering plane.
@@ -208,6 +226,8 @@ def directional_cross_section(D_nm, m_particle, setup: OpticalSetup, directions)
         parallel = np.clip(parallel, 0., 1.)
         total += beam.irradiance_fraction*((phase_matrix[0, 0]-phase_matrix[0, 1])*(1-parallel)
                                           + (phase_matrix[0, 0]+phase_matrix[0, 1])*parallel)
+    # Unlike setup_csca, this does not integrate over accepted angles. It is
+    # area per steradian, with the same array layout as the supplied directions.
     return (np.pi*(D_nm*.5e-3)**2*total).reshape(directions.shape[:-1])
 
 
@@ -248,6 +268,8 @@ def make_monotone_sigma_interpolator(
     y = np.log(cross_sections[order])
 
     if response_bins is not None and response_bins > 1:
+        # Reduce densely sampled oscillations to one representative per log
+        # interval. Empty intervals supply no information and are skipped.
         response_bins = int(response_bins)
         edges = np.linspace(x.min(), x.max(), response_bins + 1)
         representative_log_diameters = []
@@ -270,6 +292,9 @@ def make_monotone_sigma_interpolator(
         sample_weight = np.asarray(representative_counts, float)
 
     isotonic_fit = IsotonicRegression(increasing=bool(increasing), out_of_bounds="clip")
+    # Isotonic regression moves the representative signals as little as possible
+    # in weighted squared-error terms, while forbidding decreases. It can leave
+    # equal adjacent signals; the next step handles those plateaus.
     if sample_weight is None:
         fitted_log_signals = isotonic_fit.fit_transform(x, y)
     else:
@@ -291,16 +316,20 @@ def make_monotone_sigma_interpolator(
     # itself. Collapsing equal responses remains an explicit sizing approximation
     # in the Mie-oscillation region, not a resolution of its physical ambiguity.
     if increasing:
+        # PCHIP connects these knots without introducing a reversal between
+        # them. Extrapolation is disabled because no response is known outside
+        # the retained diameter range.
         log_response = PchipInterpolator(retained_log_diameters, distinct_log_signals, extrapolate=False)
     else:
         log_response = PchipInterpolator(retained_log_diameters[::-1], distinct_log_signals[::-1], extrapolate=False)
 
     def f_sigma(Dq):
-        # Preserve the callable's existing keyword while using a readable local name.
+        """Evaluate cross-section at a diameter, returning to physical units."""
         query_diameters = np.asarray(Dq, float)
         return np.exp(log_response(np.log(query_diameters)))
 
     def g_diam(sig):
+        """Find the diameter giving this signal on the forward curve above."""
         query_signals = np.asarray(sig, float)
         result = np.full(query_signals.shape, np.nan)
         flat = query_signals.ravel()
@@ -313,6 +342,8 @@ def make_monotone_sigma_interpolator(
         if not np.any(valid):
             return result
         target_log_signals = np.clip(target[valid], distinct_log_signals[0], distinct_log_signals[-1])
+        # Sorted signal knots tell us which two diameters enclose each answer.
+        # We can then search just that interval instead of the whole LUT range.
         interval_index = np.clip(
             np.searchsorted(distinct_log_signals, target_log_signals, side="right") - 1,
             0, distinct_log_signals.size - 2,
@@ -344,6 +375,8 @@ def setup_geometry_cache(setup: OpticalSetup):
     particle size or refractive index. Reuse them throughout a LUT build,
     but rebuild them if the setup changes.
     """
+    # Each detector has one set of weights per incident beam. A reversed beam
+    # has a different definition of forward scattering, even for the same lens.
     return {channel.name: tuple(channel_geometry_cache(beam, channel, setup.angular_step_deg)
                                for beam in setup.beams) for channel in setup.channels}
 
@@ -376,6 +409,8 @@ def channel_geometry_cache(beam, channel, step_deg):
         if (concentric and 0 <= inner < cone.half_angle_deg < 90
                 and abs(np.dot(cone.axis, beam.direction)) < 1e-14
                 and abs(np.dot(cone.axis, beam.polarization)) < 1e-14):
+            # This side-facing circular aperture has a simple exact azimuth
+            # formula. Keep its established theta grid as well as its weights.
             return _side_collection_cache(cone.half_angle_deg, inner, step_deg)
     limits, events = [], []
     for cone in channel.collect + channel.exclude:
@@ -388,6 +423,9 @@ def channel_geometry_cache(beam, channel, step_deg):
     if hi <= lo:
         raise ValueError("collection must have nonzero angular extent")
     count = max(256, int(np.ceil((hi-lo)/step_deg))) + 1
+    # Add cone edges and centres to the regular grid so geometry changes do
+    # not fall unnoticed between samples. The azimuth helper combines accepted
+    # cones and subtracts exclusions before computing polarization weights.
     deg = np.unique(np.r_[np.linspace(lo, hi, count),
                           [v for v in events if lo <= v <= hi]])
     theta = np.deg2rad(deg)
@@ -405,17 +443,19 @@ def _same_scattering_geometry(first, second):
 
 @dataclass(frozen=True)
 class _SideCollectionCache:
+    """Angular samples and weights for one detector/beam pair.
+
+    theta_rad is the scattering angle and mu is its cosine. dphi is the total
+    accepted azimuth width. perp_phi and parallel_phi include the squared
+    electric-field projections integrated over that width. They add to dphi.
+    The name reflects the original side-facing implementation; the same arrays
+    also describe tilted and beam-aligned collection regions.
+    """
     theta_rad: np.ndarray
     mu: np.ndarray
     dphi: np.ndarray
     perp_phi: np.ndarray
     parallel_phi: np.ndarray
-
-
-@dataclass(frozen=True)
-class _POPSCache:
-    mirror: _SideCollectionCache
-    direct: _SideCollectionCache | None
 
 
 def _cone_azimuth_weights(theta_rad, halfangle_deg):
@@ -441,6 +481,7 @@ def _cone_azimuth_weights(theta_rad, halfangle_deg):
 
 
 def _side_collection_cache(outer_deg, inner_deg, step_deg):
+    """Build angular weights for a side-facing cone with an optional opening."""
     if not np.isfinite(step_deg) or step_deg <= 0:
         raise ValueError("ring_step_deg must be finite and > 0")
     if not (np.isfinite(outer_deg) and np.isfinite(inner_deg)
@@ -455,6 +496,9 @@ def _side_collection_cache(outer_deg, inner_deg, step_deg):
     th = np.deg2rad(deg)
     outer = _cone_azimuth_weights(th, outer_deg)
     inner = _cone_azimuth_weights(th, inner_deg)
+    # Remove the inner opening from the outer cone. Roundoff can otherwise
+    # leave a tiny negative accepted width at a boundary; light cannot have
+    # a negative collection weight.
     weights = [np.maximum(a - b, 0.0) for a, b in zip(outer, inner)]
     return _SideCollectionCache(th, np.cos(th), *weights)
 
@@ -477,145 +521,8 @@ if _HAVE_NUMBA:
 else:
     _trapz_numba = None
 
-# Compatibility wrappers for existing callers.
-
-def pops_geometry_cache(geom: POPSGeom) -> _POPSCache:
-    """Legacy cache view; new calculations use setup_geometry_cache directly."""
-    setup = pops_optical_setup(geom)
-    caches = [channel_geometry_cache(setup.beams[0], ch, setup.angular_step_deg)
-              for ch in setup.channels]
-    return _POPSCache(caches[0], caches[1] if len(caches) > 1 else None)
-
-
-def uhsas_geometry_cache(geom: UHSASGeom) -> _SideCollectionCache:
-    """Legacy single-arm cache view, retained for callers inspecting its arrays."""
-    setup = uhsas_optical_setup(geom)
-    return channel_geometry_cache(setup.beams[0], setup.channels[0], setup.angular_step_deg)
-
-
-def pops_csca(
-    D_nm,
-    m_particle,
-    wavelength_nm: float,
-    *,
-    geom: POPSGeom,
-    _cache=None,
-):
-    """POPS collected cross-section [um^2] for linearly polarized light.
-
-    Uses the general setup integrator. Preserve the existing single-array
-    output: mirror collection plus the optional explicitly configured direct
-    path. Old _POPSCache inputs are accepted for caller compatibility.
-    """
-    setup = pops_optical_setup(geom, wavelength_nm=wavelength_nm)
-    if isinstance(_cache, _POPSCache):
-        paths = (_cache.mirror,) if _cache.direct is None else (_cache.mirror, _cache.direct)
-        _cache = {channel.name: (path,) for channel, path in zip(setup.channels, paths, strict=True)}
-    result = setup_csca(D_nm, m_particle, setup, _cache=_cache)
-    return np.sum(list(result.values()), axis=0)
-
-
-def pops_csca_parallel(  # parallel calculation. As in parallel computing, not polarization.
-    D_nm,
-    m_particle,
-    wavelength_nm: float,
-    *,
-    geom: POPSGeom,
-    _cache=None,
-    n_jobs: int = -1,
-    backend: str = "threads",
-):
-    D_nm = np.atleast_1d(D_nm).astype(float)
-    c = (_cache if _cache is not None else
-         setup_geometry_cache(pops_optical_setup(geom, wavelength_nm=wavelength_nm)))
-    def _one(d):
-        return pops_csca([d], m_particle, wavelength_nm, geom=geom, _cache=c)[0]
-    vals = Parallel(n_jobs=n_jobs, prefer=backend)(delayed(_one)(float(d)) for d in D_nm)
-    return np.asarray(vals, dtype=float)
-
-
-def uhsas_csca(
-    D_nm,
-    m_particle,
-    wavelength_nm: float,
-    *,
-    geom: UHSASGeom,
-    _cache=None,
-):
-    """UHSAS collected cross-section [um^2], per collection arm.
-
-    Uses the general setup integrator with both opposing beams. Return only
-    Collection 1, not the sum of the two detectors. A legacy single-arm cache
-    remains valid for the identical beam-relative geometries of this preset.
-    """
-    setup = uhsas_optical_setup(geom, wavelength_nm=wavelength_nm)
-    if isinstance(_cache, _SideCollectionCache):
-        _cache = {channel.name: (_cache,) * len(setup.beams) for channel in setup.channels}
-    return setup_csca(D_nm, m_particle, setup, _cache=_cache)["Collection 1"]
-
-
-def uhsas_csca_parallel(
-    D_nm,
-    m_particle,
-    wavelength_nm: float,
-    *,
-    geom: UHSASGeom,
-    _cache=None,
-    n_jobs: int = -1,
-    backend: str = "threads",
-):
-    D_nm = np.atleast_1d(D_nm).astype(float)
-    c = (_cache if _cache is not None else
-         setup_geometry_cache(uhsas_optical_setup(geom, wavelength_nm=wavelength_nm)))
-    def _one(d):
-        return uhsas_csca([d], m_particle, wavelength_nm, geom=geom, _cache=c)[0]
-    vals = Parallel(n_jobs=n_jobs, prefer=backend)(delayed(_one)(float(d)) for d in D_nm)
-    return np.asarray(vals, dtype=float)
-
-
-def pcasp_csca(D_nm, m_particle, wavelength_nm=PCASP_WAVELENGTH_NM, *,
-               geom: PCASPGeom | None = None, _cache=None):
-    """PCASP collected cross-section [um^2] per total incident irradiance.
-
-    With the default equal beams, multiply by two only when comparing with
-    Rosenberg's Table-1 weighting (which uses outgoing-beam irradiance).
-    Use the unscaled result for both sides of a diameter conversion.
-    """
-    setup = pcasp_optical_setup(geom, wavelength_nm=wavelength_nm)
-    return setup_csca(D_nm, m_particle, setup, _cache=_cache)["Collection"]
-
-
 __all__ = [
-    "load_optical_setup",
-    # Geom + caches
-    "POPSGeom", "UHSASGeom", "PCASPGeom",
-    "CollectionCone", "CollectionChannel", "IncidentBeam", "OpticalSetup",
-    "pops_optical_setup", "uhsas_optical_setup", "pcasp_optical_setup", "optical_setup_from_lut_metadata",
-    "las_uhsas_proxy_setup",
-    "setup_geometry_cache", "channel_geometry_cache", "setup_csca",
-    "directional_cross_section", "build_setup_sigma_lut",
-    "pops_geometry_cache", "uhsas_geometry_cache",
-    # Kernels
-    "pops_csca", "pops_csca_parallel",
-    "uhsas_csca", "uhsas_csca_parallel",
-    "pcasp_csca",
-    # LUT build
-    "build_sigma_lut",
-    "build_pops_sigma_lut",
-    "build_uhsas_sigma_lut",
-    "build_pcasp_sigma_lut",
-    # Query
-    "SigmaLUT",
-    "sigma_query_zarr",
-    # Monotone + inverse
-    "make_monotone_sigma_interpolator",
-    # Remap
-    "convert_do_lut",
-    # Constants
-    "POPS_WAVELENGTH_NM",
-    "UHSAS_WAVELENGTH_NM",
-    "PCASP_WAVELENGTH_NM",
-    "RI_UHSAS_SRC",
-    "RI_POPS_SRC",
-    "OPTICAL_MODEL_VERSION",
+    "convert_do_lut", "setup_csca", "directional_cross_section",
+    "make_monotone_sigma_interpolator", "setup_geometry_cache",
+    "channel_geometry_cache",
 ]

@@ -9,19 +9,18 @@ import numpy as np
 import pytest
 
 from sizedistmerge import optical_diameter as optics
-from sizedistmerge import optical_geometry as geometry
-from sizedistmerge import optical_lut
+from sizedistmerge import optical_geometry, optical_lut
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize('name,settings_type,factory', [
-    ('pops', optics.POPSGeom, optics.pops_optical_setup),
-    ('uhsas', optics.UHSASGeom, optics.uhsas_optical_setup),
-    ('pcasp', optics.PCASPGeom, optics.pcasp_optical_setup),
+    ('pops', optical_geometry.POPSGeom, optical_geometry.pops_optical_setup),
+    ('uhsas', optical_geometry.UHSASGeom, optical_geometry.uhsas_optical_setup),
+    ('pcasp', optical_geometry.PCASPGeom, optical_geometry.pcasp_optical_setup),
 ])
 def test_toml_reproduces_legacy_geometry_and_cross_sections(name, settings_type, factory):
-    configured = geometry.load_optical_setup(name)
+    configured = optical_geometry.load_optical_setup(name)
     legacy = factory(settings_type())
     assert configured.to_dict() == legacy.to_dict()
     assert factory().to_dict() == legacy.to_dict()
@@ -38,18 +37,23 @@ def test_custom_settings_reject_misspellings_and_invalid_polarization(tmp_path):
     custom = tmp_path/'custom.toml'
     custom.write_text(text.replace('half_angle_deg', 'half_angel_deg'))
     with pytest.raises(ValueError, match='Unknown CollectionCone'):
-        geometry.load_optical_setup(custom)
+        optical_geometry.load_optical_setup(custom)
     custom.write_text(text.replace('polarization = [1.0, 0.0, 0.0]', 'polarization = [0.0, 0.0, 1.0]'))
     with pytest.raises(ValueError, match='perpendicular'):
-        geometry.load_optical_setup(custom)
+        optical_geometry.load_optical_setup(custom)
     custom.write_text(text.replace('half_angle_deg = 52.0', 'half_angle_deg = 40.0'))
-    assert geometry.load_optical_setup(custom).channels[0].collect[0].half_angle_deg == 40.
+    assert optical_geometry.load_optical_setup(custom).channels[0].collect[0].half_angle_deg == 40.
 
 
-def test_lut_import_aliases_are_preserved():
-    assert optics.SigmaLUT is optical_lut.SigmaLUT
-    assert optics.build_setup_sigma_lut is optical_lut.build_setup_sigma_lut
-    assert optics.POPSGeom is geometry.POPSGeom
+def test_public_exports_come_from_their_own_modules():
+    import sizedistmerge
+    assert sizedistmerge.SigmaLUT is optical_lut.SigmaLUT
+    assert sizedistmerge.load_optical_setup is optical_geometry.load_optical_setup
+    assert sizedistmerge.setup_csca is optics.setup_csca
+    for removed in ('pops_csca', 'uhsas_csca', 'pcasp_csca', 'pops_geometry_cache',
+                    'uhsas_geometry_cache', 'pops_csca_parallel', 'uhsas_csca_parallel'):
+        assert not hasattr(optics, removed)
+        assert not hasattr(sizedistmerge, removed)
 
 
 def test_installed_style_settings_and_import_order(tmp_path):

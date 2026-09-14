@@ -12,8 +12,8 @@ indices and merged distributions have not yet been established.
 For the code layout, editable OPC settings, and the two calculation paths,
 see [Reading and configuring the optical code](optical_code_guide.md).
 
-`pops_csca` and `uhsas_csca` return collected scattering cross-section in square
-micrometers, for a homogeneous sphere in air. They do not include laser power,
+`setup_csca` returns each detector's collected scattering cross-section in square
+micrometers, for a homogeneous sphere in air. It does not include laser power,
 mirror reflectivity, detector gain, particle-position variability, or
 instrument-specific calibration adjustments. Transmission is uniform inside
 each modeled opening and zero outside it.
@@ -96,30 +96,29 @@ POPS, UHSAS, PCASP and custom instruments all describe their accepted directions
 with `CollectionCone`, `CollectionChannel`, `IncidentBeam` and `OpticalSetup`.
 The instrument setup functions provide the preset numbers; `setup_geometry_cache`
 calculates the integration weights, and `setup_csca` performs the scattering
-calculation. The POPS/UHSAS wrappers and their LUT builders now use that same
-general path, rather than separate loops over particle diameters.
+calculation. The LUT builders use that same general path for every instrument.
 
 ```python
 from sizedistmerge import optical_diameter as od
+from sizedistmerge.optical_geometry import load_optical_setup
 
-setup = od.uhsas_optical_setup(od.UHSASGeom())
+setup = load_optical_setup("uhsas")
 cache = od.setup_geometry_cache(setup)
 signals = od.setup_csca([100., 200., 500.], 1.52 + 0j, setup, _cache=cache)
 sigma_one_detector = signals["Collection 1"]
 ```
 
-Separate detectors remain separate outputs. `uhsas_csca` returns only
-`Collection 1`, per total incident irradiance, without adding the opposite
-detector. `pops_csca` preserves its existing output: mirror collection plus
-the optional direct path if explicitly enabled. The default is still mirror-only.
+Separate detectors remain separate outputs. For UHSAS, select
+`signals["Collection 1"]`, per total incident irradiance, without adding the
+opposite detector. POPS defaults to mirror-only `signals["Collection"]`.
+An explicitly configured direct path has its own output; adding it is a
+separate, deliberate choice by the caller.
 The general integrator reuses a calculated spectrum when angle grids and both
 polarization weights are exactly equal, avoiding repeated Mie work for symmetric
 UHSAS paths without changing the incident-intensity fractions.
 
-`pops_geometry_cache` and `uhsas_geometry_cache` remain compatibility views for
-existing callers that inspect the old cache fields. Their returned caches are
-still accepted by the instrument wrappers; new code can use
-`setup_geometry_cache(setup)` for every instrument. Physical settings, angular
+The old instrument-specific scattering and cache wrappers have been removed.
+Use `setup_geometry_cache(setup)` for every instrument. Physical settings, angular
 resolution, normalization and optical-model version are unchanged by this
 refactor, so this change alone does not require rebuilding LUTs.
 
@@ -177,14 +176,15 @@ reject historical, unknown-version, or incomplete tables by default.
 For a small local check (NOT a production-resolution LUT):
 
 ```python
-from sizedistmerge import optical_diameter as od
+from sizedistmerge.optical_geometry import load_optical_setup
+from sizedistmerge.optical_lut import build_setup_sigma_lut, SigmaLUT
 
-od.build_pops_sigma_lut(
-    "pops_mirror_only_check.zarr", od.POPSGeom(),
+build_setup_sigma_lut(
+    "pops_mirror_only_check.zarr", load_optical_setup("pops"), channel="Collection",
     D_range=(100., 3000., 100), n_range=(1.3, 1.8, 0.05),
     k_values=(0., 0.001), jobs_per_k=1,
 )
-lut = od.SigmaLUT("pops_mirror_only_check.zarr")
+lut = SigmaLUT("pops_mirror_only_check.zarr")
 ```
 
 For deliberately inspecting historical tables:

@@ -36,13 +36,9 @@ from sizedistmerge.utils import (
     select_between,
 )
 from sizedistmerge.alignment import optimize_multi_custom
-from sizedistmerge.optical_diameter import (
-    SigmaLUT,
-    convert_do_lut,
-    make_monotone_sigma_interpolator,
-    RI_UHSAS_SRC,
-    RI_POPS_SRC,
-)
+from sizedistmerge.optical_lut import SigmaLUT
+from sizedistmerge.optical_diameter import convert_do_lut, make_monotone_sigma_interpolator
+from sizedistmerge.optical_geometry import RI_UHSAS_SRC, RI_POPS_SRC
 from sizedistmerge.diameter_conversion import da_to_dv
 from sizedistmerge.combine import (make_grid_from_series, merge_sizedists_tikhonov,
                                   merge_sizedists_tikhonov_consensus, smooth_weight_profile,

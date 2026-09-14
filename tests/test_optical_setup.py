@@ -8,6 +8,7 @@ import numpy as np
 from numpy.polynomial.legendre import leggauss
 import pytest
 import zarr
+from sizedistmerge import optical_geometry, optical_lut
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sizedistmerge import optical_diameter as od
@@ -15,25 +16,25 @@ from sizedistmerge.optical_geometry import channel_azimuth_weights
 
 
 def test_cone_solid_angle_boundary_and_validation():
-    cone = od.CollectionCone.from_solid_angle((1, 2, 3), 1.7)
+    cone = optical_geometry.CollectionCone.from_solid_angle((1, 2, 3), 1.7)
     assert cone.solid_angle_sr == pytest.approx(1.7)
     rim = cone.boundary(np.linspace(0, 2*np.pi, 101))
     assert np.allclose(np.linalg.norm(rim, axis=1), 1)
     assert np.allclose(rim @ cone.axis, np.cos(np.deg2rad(cone.half_angle_deg)))
     with pytest.raises(ValueError):
-        od.CollectionCone((0, 0, 0), 30)
+        optical_geometry.CollectionCone((0, 0, 0), 30)
     with pytest.raises(ValueError):
-        od.IncidentBeam(polarization=(0, 0, 1))
+        optical_geometry.IncidentBeam(polarization=(0, 0, 1))
     with pytest.raises(ValueError):
-        od.OpticalSetup(405, (od.IncidentBeam(irradiance_fraction=.5),),
-                        (od.CollectionChannel("a", (cone,)),))
+        optical_geometry.OpticalSetup(405, (optical_geometry.IncidentBeam(irradiance_fraction=.5),),
+                        (optical_geometry.CollectionChannel("a", (cone,)),))
 
 
 def test_union_exclusions_and_seam_match_direction_membership():
-    beam = od.IncidentBeam()
-    channel = od.CollectionChannel('detector',
-        (od.CollectionCone((1, 1, 1), 55), od.CollectionCone((-1, 1, 0), 65)),
-        (od.CollectionCone((0, 1, .1), 20), od.CollectionCone((.2, 1, .1), 25)))
+    beam = optical_geometry.IncidentBeam()
+    channel = optical_geometry.CollectionChannel('detector',
+        (optical_geometry.CollectionCone((1, 1, 1), 55), optical_geometry.CollectionCone((-1, 1, 0), 65)),
+        (optical_geometry.CollectionCone((0, 1, .1), 20), optical_geometry.CollectionCone((.2, 1, .1), 25)))
     phi = (np.arange(40000)+.5)*2*np.pi/40000
     for theta in np.deg2rad([20, 60, 90, 115, 150]):
         vectors = (np.cos(theta)*np.array(beam.direction) + np.sin(theta)
@@ -48,9 +49,9 @@ def test_union_exclusions_and_seam_match_direction_membership():
 
 @pytest.mark.parametrize('axis', [(0, 0, 1), (1, 0, 0), (1, 2, 3), (0, 0, -1)])
 def test_arbitrary_direction_dipole_limit(axis):
-    cone = od.CollectionCone(axis, 35)
-    setup = od.OpticalSetup(405, (od.IncidentBeam(),),
-                            (od.CollectionChannel('detector', (cone,)),), angular_step_deg=.125)
+    cone = optical_geometry.CollectionCone(axis, 35)
+    setup = optical_geometry.OpticalSetup(405, (optical_geometry.IncidentBeam(),),
+                            (optical_geometry.CollectionChannel('detector', (cone,)),), angular_step_deg=.125)
     actual = od.setup_csca([1.], 1.52, setup)['detector'][0]
     total = np.pi*(.5e-3)**2*od.mie.efficiencies(1.52, 1., 405.)[1]
     a2 = np.dot(cone.axis, setup.beams[0].polarization)**2
@@ -60,9 +61,9 @@ def test_arbitrary_direction_dipole_limit(axis):
 
 
 def test_tilted_cone_against_independent_detector_coordinate_quadrature():
-    cone = od.CollectionCone((.3, .7, .8), 43.)
-    setup = od.OpticalSetup(700., (od.IncidentBeam(),),
-                           (od.CollectionChannel('tilted', (cone,)),), angular_step_deg=.125)
+    cone = optical_geometry.CollectionCone((.3, .7, .8), 43.)
+    setup = optical_geometry.OpticalSetup(700., (optical_geometry.IncidentBeam(),),
+                           (optical_geometry.CollectionChannel('tilted', (cone,)),), angular_step_deg=.125)
     x, w = leggauss(100)
     lo = np.cos(np.deg2rad(cone.half_angle_deg))
     mu = (1-lo)*x/2+(1+lo)/2
@@ -76,60 +77,52 @@ def test_tilted_cone_against_independent_detector_coordinate_quadrature():
 
 
 def test_rotating_all_inputs_together_preserves_result():
-    cone = od.CollectionCone((.3, .7, .8), 43.)
-    setup = od.OpticalSetup(700., (od.IncidentBeam(),), (od.CollectionChannel('a', (cone,)),))
+    cone = optical_geometry.CollectionCone((.3, .7, .8), 43.)
+    setup = optical_geometry.OpticalSetup(700., (optical_geometry.IncidentBeam(),), (optical_geometry.CollectionChannel('a', (cone,)),))
     # A proper rotation, not a change of the angle between E and the collector.
     q, _ = np.linalg.qr(np.array([[1., 2., 3.], [-1., .2, 4.], [2., 3., 1.]]))
     beam = setup.beams[0]
-    rotated = replace(setup, beams=(od.IncidentBeam(q @ beam.direction, q @ beam.polarization),),
-                      channels=(od.CollectionChannel('a', (od.CollectionCone(q @ cone.axis, 43.),)),))
+    rotated = replace(setup, beams=(optical_geometry.IncidentBeam(q @ beam.direction, q @ beam.polarization),),
+                      channels=(optical_geometry.CollectionChannel('a', (optical_geometry.CollectionCone(q @ cone.axis, 43.),)),))
     assert np.allclose(od.setup_csca([100., 500., 1000.], 1.6, setup)['a'],
                        od.setup_csca([100., 500., 1000.], 1.6, rotated)['a'], rtol=1e-12)
 
 
 def test_uhsas_channels_and_total_irradiance_no_factor_two():
-    setup = od.uhsas_optical_setup()
+    setup = optical_geometry.uhsas_optical_setup()
     result = od.setup_csca([100., 500., 1000.], 1.52, setup)
-    original = od.uhsas_csca([100., 500., 1000.], 1.52, 1054., geom=od.UHSASGeom())
+    # A single beam at total irradiance must give the same result as the two
+    # symmetric counter-propagating half-irradiance beams, not half the result.
+    single_beam = replace(setup, beams=(replace(setup.beams[0], irradiance_fraction=1.),))
+    original = od.setup_csca([100., 500., 1000.], 1.52, single_beam)['Collection 1']
     assert list(result) == ['Collection 1', 'Collection 2']
     for value in result.values():
         assert np.array_equal(value, original)
 
 
 @pytest.mark.parametrize('kind', ['pops', 'pops_direct', 'uhsas'])
-def test_preset_wrappers_use_general_integrator_with_old_and_new_caches(monkeypatch, kind):
+def test_general_integrator_cached_and_uncached_outputs_agree(kind):
     d, ri = [60., 300., 1000.], 1.615+.001j
     if kind == 'uhsas':
-        geom, wavelength = od.UHSASGeom(), 1054.
-        fn, cache_fn, setup_fn = od.uhsas_csca, od.uhsas_geometry_cache, od.uhsas_optical_setup
+        geom, wavelength = optical_geometry.UHSASGeom(), 1054.
+        setup_fn = optical_geometry.uhsas_optical_setup
     else:
-        geom, wavelength = od.POPSGeom(), 405.
+        geom, wavelength = optical_geometry.POPSGeom(), 405.
         if kind == 'pops_direct':
             # Synthetic optional aperture, not a measured POPS detector position.
             geom = replace(geom, pmt_aperture_d_mm=5., pmt_aperture_distance_mm=20.)
-        fn, cache_fn, setup_fn = od.pops_csca, od.pops_geometry_cache, od.pops_optical_setup
+        setup_fn = optical_geometry.pops_optical_setup
     setup = setup_fn(geom, wavelength_nm=wavelength)
-    real_integrator = od.setup_csca
-    result = real_integrator(d, ri, setup)
-    expected = result['Collection 1'] if kind == 'uhsas' else np.sum(list(result.values()), axis=0)
-    calls = []
-
-    def record_call(diameters, refractive_index, configuration, *, _cache=None):
-        calls.append((configuration, _cache))
-        return real_integrator(diameters, refractive_index, configuration, _cache=_cache)
-
-    monkeypatch.setattr(od, 'setup_csca', record_call)
-    for cache in (None, od.setup_geometry_cache(setup), cache_fn(geom)):
-        actual = fn(d, ri, wavelength, geom=geom, _cache=cache)
-        assert np.array_equal(actual, expected)
-    assert len(calls) == 3
-    assert all(configuration == setup for configuration, _ in calls)
-    assert all(cache is None or isinstance(cache, dict) for _, cache in calls)
+    expected = od.setup_csca(d, ri, setup)
+    actual = od.setup_csca(d, ri, setup, _cache=od.setup_geometry_cache(setup))
+    assert list(actual) == list(expected)
+    for channel in expected:
+        assert np.array_equal(actual[channel], expected[channel])
 
 
 @pytest.mark.parametrize('kind,expected_paths', [('uhsas', 1), ('pcasp', 2)])
 def test_general_integrator_reuses_only_identical_scattering_geometries(monkeypatch, kind, expected_paths):
-    setup = od.uhsas_optical_setup() if kind == 'uhsas' else od.pcasp_optical_setup()
+    setup = optical_geometry.uhsas_optical_setup() if kind == 'uhsas' else optical_geometry.pcasp_optical_setup()
     diameters, ri = [100., 500., 1000.], 1.6+.01j
     expected = od.setup_csca(diameters, ri, setup)
     original = od._collected_cross_section
@@ -149,7 +142,7 @@ def test_general_integrator_reuses_only_identical_scattering_geometries(monkeypa
 
 @pytest.mark.parametrize('kind', ['pops', 'pops_direct', 'uhsas'])
 def test_preset_luts_use_general_integrator_and_keep_output_conventions(tmp_path, monkeypatch, kind):
-    geom, wavelength = (od.UHSASGeom(), 1054.) if kind == 'uhsas' else (od.POPSGeom(), 405.)
+    geom, wavelength = (optical_geometry.UHSASGeom(), 1054.) if kind == 'uhsas' else (optical_geometry.POPSGeom(), 405.)
     if kind == 'pops_direct':
         geom = replace(geom, pmt_aperture_d_mm=5., pmt_aperture_distance_mm=20.)
     kernel = 'uhsas' if kind == 'uhsas' else 'pops'
@@ -162,7 +155,7 @@ def test_preset_luts_use_general_integrator_and_keep_output_conventions(tmp_path
 
     monkeypatch.setattr(od, 'setup_csca', record_call)
     path = tmp_path / (kind+'.zarr')
-    od.build_sigma_lut(str(path), kernel, wavelength, geom,
+    optical_lut.build_sigma_lut(str(path), kernel, wavelength, geom,
         D_range=(100., 1000., 3), n_range=(1.5, 1.6, .1), k_values=(0., .001),
         chunks=(3, 2, 1), jobs_per_k=1)
     assert len(calls) == 4
@@ -171,8 +164,8 @@ def test_preset_luts_use_general_integrator_and_keep_output_conventions(tmp_path
     attrs = dict(root.attrs)
     assert attrs['kernel'] == kernel.upper()
     assert attrs['collection_arms'] == 1
-    assert attrs['optical_model_version'] == od.OPTICAL_MODEL_VERSION
-    full_setup = od.optical_setup_from_lut_metadata(attrs)
+    assert attrs['optical_model_version'] == optical_geometry.OPTICAL_MODEL_VERSION
+    full_setup = optical_geometry.optical_setup_from_lut_metadata(attrs)
     result = real_integrator(np.asarray(root['coords/D_nm']), 1.5, full_setup)
     if kind == 'uhsas':
         assert len(full_setup.beams) == 2 and len(full_setup.channels) == 2
@@ -187,18 +180,17 @@ def test_preset_luts_use_general_integrator_and_keep_output_conventions(tmp_path
 
 @pytest.mark.parametrize('kind', ['pops', 'uhsas'])
 def test_preset_input_validation_is_performed_by_shared_path(kind):
-    geom, wavelength, fn = ((od.POPSGeom(), 405., od.pops_csca) if kind == 'pops'
-                            else (od.UHSASGeom(), 1054., od.uhsas_csca))
+    setup = optical_geometry.load_optical_setup(kind)
     for diameters in ([0.], [-1.], [np.nan], [np.inf], [[100., 200.]]):
         with pytest.raises(ValueError):
-            fn(diameters, 1.52, wavelength, geom=geom)
+            od.setup_csca(diameters, 1.52, setup)
     for invalid_wavelength in (0., -1., np.nan, np.inf):
         with pytest.raises(ValueError):
-            fn([100.], 1.52, invalid_wavelength, geom=geom)
+            replace(setup, wavelength_nm=invalid_wavelength)
 
 
 def test_full_sphere_directional_integral_is_total_scattering():
-    setup = od.uhsas_optical_setup()
+    setup = optical_geometry.uhsas_optical_setup()
     mu, weights = leggauss(100)
     phi = (np.arange(120)+.5)*2*np.pi/120
     dirs = np.stack(np.broadcast_arrays(
@@ -210,19 +202,19 @@ def test_full_sphere_directional_integral_is_total_scattering():
 
 
 def test_custom_lut_stores_full_setup_and_selected_channel(tmp_path):
-    setup = od.OpticalSetup(650, (od.IncidentBeam(),), (od.CollectionChannel(
-        'tilted', (od.CollectionCone((0, 1, 1), 40),), (od.CollectionCone((0, 1, 1), 10),)),))
-    assert od.OpticalSetup.from_dict(json.loads(json.dumps(setup.to_dict()))) == setup
+    setup = optical_geometry.OpticalSetup(650, (optical_geometry.IncidentBeam(),), (optical_geometry.CollectionChannel(
+        'tilted', (optical_geometry.CollectionCone((0, 1, 1), 40),), (optical_geometry.CollectionCone((0, 1, 1), 10),)),))
+    assert optical_geometry.OpticalSetup.from_dict(json.loads(json.dumps(setup.to_dict()))) == setup
     path = tmp_path/'custom.zarr'
-    od.build_setup_sigma_lut(str(path), setup, channel='tilted',
+    optical_lut.build_setup_sigma_lut(str(path), setup, channel='tilted',
         D_range=(100, 600, 3), n_range=(1.5, 1.6, .1), k_values=(0., .001), chunks=(3, 2, 1), jobs_per_k=1)
     root = zarr.open(str(path), mode='r')
     assert root.attrs['response_channels'] == ['tilted']
-    assert od.optical_setup_from_lut_metadata(root.attrs) == setup
-    lut = od.SigmaLUT(str(path))
+    assert optical_geometry.optical_setup_from_lut_metadata(root.attrs) == setup
+    lut = optical_lut.SigmaLUT(str(path))
     assert np.allclose(lut.SIG[:, 0, 0], od.setup_csca(lut.Dg, 1.5, setup)['tilted'], rtol=1e-7)
     with pytest.raises(ValueError, match='select exactly one'):
-        od.build_setup_sigma_lut(str(tmp_path/'bad.zarr'), setup, channel='absent')
+        optical_lut.build_setup_sigma_lut(str(tmp_path/'bad.zarr'), setup, channel='absent')
     assert not (tmp_path/'bad.zarr').exists()
 
 
@@ -235,10 +227,10 @@ def test_preset_values_are_bitwise_unchanged_from_pre_interface_snapshot():
     for row in PRE_INTERFACE_VALUES:
         ri = complex(*row['ri'])
         if row['name'] == 'pops':
-            actual = od.pops_csca(row['D'], ri, 405., geom=od.POPSGeom())
-            shared = od.setup_csca(row['D'], ri, od.pops_optical_setup())['Collection']
+            actual = np.sum(list(od.setup_csca(row['D'], ri, optical_geometry.pops_optical_setup(optical_geometry.POPSGeom(), wavelength_nm=405.)).values()), axis=0)
+            shared = od.setup_csca(row['D'], ri, optical_geometry.pops_optical_setup())['Collection']
         else:
-            actual = od.uhsas_csca(row['D'], ri, 1054., geom=od.UHSASGeom())
-            shared = od.setup_csca(row['D'], ri, od.uhsas_optical_setup())['Collection 1']
+            actual = od.setup_csca(row['D'], ri, optical_geometry.uhsas_optical_setup(optical_geometry.UHSASGeom(), wavelength_nm=1054.))["Collection 1"]
+            shared = od.setup_csca(row['D'], ri, optical_geometry.uhsas_optical_setup())['Collection 1']
         assert np.array_equal(actual, row['sigma'])
         assert np.array_equal(shared, row['sigma'])

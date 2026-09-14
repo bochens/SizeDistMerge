@@ -40,7 +40,8 @@ separate and weights beams by their fraction of total incident intensity.
 
 - `src/optical_diameter.py`: scattering, monotone response, diameter conversion.
 - `src/optical_geometry.py`: beams, collection/exclusion cones, validation,
-  and the TOML loader. Older instrument-specific settings remain here for compatibility.
+  and the TOML loader. Instrument-specific settings also support explicit
+  in-memory experiments with different angles or wavelengths.
 - `src/optical_lut.py`: table building, disk access, and interpolation.
 - `opc_setups/pops.toml`, `uhsas.toml`, `pcasp.toml`: commented instrument settings.
 
@@ -81,10 +82,15 @@ Mie integration function. Load its explicit path to try it.
 The setup files do **not** specify campaign calibration RI, LUT sampling grids,
 or merge weights. Those are separate choices in the build/run configuration.
 
-## Compatibility and reproducibility
+## Imports and reproducibility
 
-Existing imports such as `optical_diameter.SigmaLUT` and the old instrument
-wrappers still work. The no-argument preset factories load TOML. Passing an
+Import `SigmaLUT` and LUT builders from `optical_lut`, and geometry settings
+from `optical_geometry`. The old instrument-specific scattering and cache
+wrappers have been removed. For every instrument, use `setup_csca(setup=...)`
+and `setup_geometry_cache(setup)`; choose the required named detector from
+the returned dictionary. Parallel LUT building remains in `optical_lut`.
+
+The no-argument preset factories load TOML. Passing an
 explicit `POPSGeom`, `UHSASGeom`, or `PCASPGeom` instead retains the legacy
 Python settings path; it intentionally does not read a TOML override.
 

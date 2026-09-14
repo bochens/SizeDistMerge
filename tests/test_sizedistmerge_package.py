@@ -40,6 +40,8 @@ assert callable(sdm.calculate_dry_diameter)
 assert callable(sdm.kappa_from_growth_factor)
 assert "miepython" not in sys.modules
 assert callable(sdm.POPSGeom)
+assert "miepython" not in sys.modules
+assert callable(sdm.setup_csca)
 assert "miepython" in sys.modules
 assert callable(sdm.merge_sizedists_tikhonov_consensus)
 assert callable(sdm.temporal_parameter_penalty)

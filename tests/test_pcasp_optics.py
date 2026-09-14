@@ -7,6 +7,7 @@ import numpy as np
 from numpy.polynomial.legendre import leggauss
 import pytest
 import zarr
+from sizedistmerge import optical_geometry, optical_lut
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sizedistmerge import optical_diameter as od
@@ -28,7 +29,7 @@ def dimensional_band_integral(diameter, ri, lo, hi):
 
 
 def test_pcasp_angles_and_paper_weight():
-    setup = od.pcasp_optical_setup()
+    setup = optical_geometry.pcasp_optical_setup()
     theta = np.deg2rad([20., 40., 75., 130., 160.])
     azimuth = np.linspace(0, 2*np.pi, 17)
     outgoing = setup.channels[0].collect[0].directions(theta[:, None], azimuth)
@@ -46,11 +47,11 @@ def test_pcasp_angles_and_paper_weight():
 def test_independent_dimensional_mie(diameter, ri):
     expected = .5*(dimensional_band_integral(diameter, ri, 35., 120.)
                    + dimensional_band_integral(diameter, ri, 60., 145.))
-    assert od.pcasp_csca([diameter], ri)[0] == pytest.approx(expected, rel=2e-4)
+    assert od.setup_csca([diameter], ri, optical_geometry.pcasp_optical_setup())["Collection"][0] == pytest.approx(expected, rel=2e-4)
 
 
 def test_coaxial_band_solid_angle_and_endpoint_values():
-    setup = od.pcasp_optical_setup()
+    setup = optical_geometry.pcasp_optical_setup()
     expected = 2*np.pi*(np.cos(np.deg2rad(35))-np.cos(np.deg2rad(120)))
     for c in od.setup_geometry_cache(setup)["Collection"]:
         actual = np.trapezoid(c.dphi*np.sin(c.theta_rad), c.theta_rad)
@@ -62,13 +63,13 @@ def test_coaxial_band_solid_angle_and_endpoint_values():
 
 
 def test_polarization_and_beam_normalization():
-    setup = od.pcasp_optical_setup()
+    setup = optical_geometry.pcasp_optical_setup()
     rotated = replace(setup, beams=tuple(replace(b, polarization=(0, 1, 0)) for b in setup.beams))
     d = [100., 1000., 5000.]
     assert np.array_equal(od.setup_csca(d, 1.58, setup)["Collection"],
                           od.setup_csca(d, 1.58, rotated)["Collection"])
     for ratio in [0., .999, 1., .4]:
-        actual = od.pcasp_csca(d, 1.58, geom=od.PCASPGeom(reflected_beam_ratio=ratio))
+        actual = od.setup_csca(d, 1.58, optical_geometry.pcasp_optical_setup(optical_geometry.PCASPGeom(reflected_beam_ratio=ratio)))["Collection"]
         expected = [(dimensional_band_integral(x, 1.58, 35, 120)
                      +ratio*dimensional_band_integral(x, 1.58, 60, 145))/(1+ratio) for x in d]
         assert np.allclose(actual, expected, rtol=2e-4)
@@ -76,8 +77,8 @@ def test_polarization_and_beam_normalization():
 
 def test_convergence():
     d = np.geomspace(70, 5000, 61)
-    coarse = od.pcasp_csca(d, 1.8+.001j)
-    fine = od.pcasp_csca(d, 1.8+.001j, geom=od.PCASPGeom(ring_step_deg=.125))
+    coarse = od.setup_csca(d, 1.8+.001j, optical_geometry.pcasp_optical_setup())["Collection"]
+    fine = od.setup_csca(d, 1.8+.001j, optical_geometry.pcasp_optical_setup(optical_geometry.PCASPGeom(ring_step_deg=.125)))["Collection"]
     assert np.max(abs(coarse/fine-1)) < 2e-4
 
 
@@ -85,31 +86,31 @@ def test_convergence():
                                     dict(ring_step_deg=0), dict(reflected_beam_ratio=-1)])
 def test_invalid_geometry(kwargs):
     with pytest.raises(ValueError):
-        od.PCASPGeom(**kwargs)
+        optical_geometry.PCASPGeom(**kwargs)
 
 
 def test_pcasp_lut_metadata_and_shared_calculation(tmp_path):
     path = tmp_path/"pcasp.zarr"
-    od.build_pcasp_sigma_lut(str(path), D_range=(100., 2000., 5),
+    optical_lut.build_pcasp_sigma_lut(str(path), D_range=(100., 2000., 5),
                             n_range=(1.5, 1.6, .1), k_values=(0., .001), jobs_per_k=1)
     root = zarr.open_group(path, mode="r")
     assert root.attrs["instrument"] == "PCASP"
     assert root.attrs["outgoing_irradiance_basis_multiplier"] == 2
     assert root.attrs["build_complete"] is True
-    setup = od.optical_setup_from_lut_metadata(root.attrs)
+    setup = optical_geometry.optical_setup_from_lut_metadata(root.attrs)
     d = root["coords/D_nm"][:]
-    assert setup == od.pcasp_optical_setup()
+    assert setup == optical_geometry.pcasp_optical_setup()
     assert np.allclose(root["sigma_col"][:, 0, 0], od.setup_csca(d, 1.5, setup)["Collection"], rtol=1e-6)
     with pytest.raises(FileExistsError):
-        od.build_pcasp_sigma_lut(str(path))
+        optical_lut.build_pcasp_sigma_lut(str(path))
 
 
 def test_public_api():
     import sizedistmerge as sdm
-    assert sdm.PCASPGeom is od.PCASPGeom
+    assert sdm.PCASPGeom is optical_geometry.PCASPGeom
     assert sdm.PCASP_WAVELENGTH_NM == 632.8
-    assert sdm.pcasp_optical_setup is od.pcasp_optical_setup
-    assert sdm.build_pcasp_sigma_lut is od.build_pcasp_sigma_lut
+    assert sdm.pcasp_optical_setup is optical_geometry.pcasp_optical_setup
+    assert sdm.build_pcasp_sigma_lut is optical_lut.build_pcasp_sigma_lut
 
 
 def test_packaged_pcasp_lut():
@@ -117,13 +118,13 @@ def test_packaged_pcasp_lut():
 
     path = lut_path(" PCASP ")
     assert path.name == "pcasp_sigma_col_632p8nm.zarr"
-    lut = od.SigmaLUT(path)
+    lut = optical_lut.SigmaLUT(path)
     root = zarr.open_group(path, mode="r")
     assert root.attrs["instrument"] == "PCASP"
     assert root.attrs["build_complete"] is True
     assert lut.SIG.shape == (1000, 1001, 32)
-    setup = od.optical_setup_from_lut_metadata(root.attrs)
-    assert setup == od.pcasp_optical_setup()
+    setup = optical_geometry.optical_setup_from_lut_metadata(root.attrs)
+    assert setup == optical_geometry.pcasp_optical_setup()
     indices = [0, 250, 500, 750, 999]
     d = lut.Dg[indices]
     ri = complex(lut.ng[560], lut.kg[9])
@@ -147,4 +148,4 @@ def test_saved_mieconscat_reference():
         ((1.8+0.8j), [1.301686000827302e-05, 0.00959844060408238, 0.07731472990744512, 0.38525801633827983, 3.426582339116197]),
     ]
     for ri, expected in cases:
-        np.testing.assert_allclose(od.pcasp_csca(d, ri), expected, rtol=1e-4, atol=0.)
+        np.testing.assert_allclose(od.setup_csca(d, ri, optical_geometry.pcasp_optical_setup())["Collection"], expected, rtol=1e-4, atol=0.)

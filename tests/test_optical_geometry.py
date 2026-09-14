@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import zarr
 from numpy.polynomial.legendre import leggauss
+from sizedistmerge import optical_geometry, optical_lut
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sizedistmerge import optical_diameter as od
@@ -50,7 +51,7 @@ def test_isotropic_solid_angle_matches_exact_cone(outer, inner):
 def test_uhsas_central_opening_is_114_degrees_not_180():
     width, _, _ = od._cone_azimuth_weights(np.array([np.pi/2]), 57.)
     assert np.rad2deg(width[0]) == pytest.approx(114.)
-    c = od.uhsas_geometry_cache(od.UHSASGeom())
+    c = od.setup_geometry_cache(optical_geometry.uhsas_optical_setup(optical_geometry.UHSASGeom()))["Collection 1"][0]
     center = np.argmin(abs(c.theta_rad - np.pi/2))
     assert np.rad2deg(c.dphi[center]) == pytest.approx(114. - 29.6)
 
@@ -59,11 +60,12 @@ def test_uhsas_central_opening_is_114_degrees_not_180():
 @pytest.mark.parametrize("ri", [1.3+0j, 1.615+0.001j, 1.8+0.1j])
 @pytest.mark.parametrize("diameter", [90., 500., 2000.])
 def test_mie_integral_against_independent_detector_coordinates(kind, ri, diameter):
+    setup = optical_geometry.load_optical_setup(kind)
+    channel = 'Collection' if kind == 'pops' else 'Collection 1'
+    actual = od.setup_csca([diameter], ri, setup)[channel][0]
     if kind == "pops":
-        actual = od.pops_csca([diameter], ri, 405., geom=od.POPSGeom())[0]
         expected = detector_coordinate_integral(diameter, ri, 405., 52.)
     else:
-        actual = od.uhsas_csca([diameter], ri, 1054., geom=od.UHSASGeom())[0]
         expected = detector_coordinate_integral(diameter, ri, 1054., 57., 14.8)
     # 0.1% numerical agreement; this is NOT an instrument-calibration tolerance.
     assert actual == pytest.approx(expected, rel=1e-3)
@@ -83,47 +85,47 @@ def test_rayleigh_polarized_collection_fraction(outer, inner):
 
 
 def test_pops_direct_path_is_explicit_and_uses_its_own_distance():
-    geom = od.POPSGeom()
-    assert od.pops_geometry_cache(geom).direct is None
+    geom = optical_geometry.POPSGeom()
+    assert len(optical_geometry.pops_optical_setup(geom).channels) == 1
     with pytest.raises(ValueError, match="pmt_aperture_distance_mm"):
-        od.pops_geometry_cache(replace(geom, pmt_aperture_d_mm=5.))
+        optical_geometry.pops_optical_setup(replace(geom, pmt_aperture_d_mm=5.))
     # Synthetic geometry only: 20 mm is NOT a claimed POPS dimension.
     configured = replace(geom, pmt_aperture_d_mm=5., pmt_aperture_distance_mm=20.)
-    c = od.pops_geometry_cache(configured)
+    c = od.setup_geometry_cache(optical_geometry.pops_optical_setup(configured))
     alpha = np.rad2deg(np.arctan(2.5/20.))
     expected = detector_coordinate_integral(200., 1.615+0.001j, 405., alpha)
-    diff = (od.pops_csca([200.], 1.615+0.001j, 405., geom=configured)
-            - od.pops_csca([200.], 1.615+0.001j, 405., geom=geom))[0]
+    with_direct = od.setup_csca([200.], 1.615+0.001j, optical_geometry.pops_optical_setup(configured))
+    mirror_only = od.setup_csca([200.], 1.615+0.001j, optical_geometry.pops_optical_setup(geom))
+    diff = (sum(with_direct.values()) - sum(mirror_only.values()))[0]
     assert diff == pytest.approx(expected, rel=2e-3)
-    assert c.direct is not None
+    assert len(c) == 2
 
 
 @pytest.mark.parametrize("kind", ["pops", "uhsas"])
 def test_angular_resolution_convergence(kind):
-    geom = od.POPSGeom() if kind == "pops" else od.UHSASGeom()
-    fn, wl = (od.pops_csca, 405.) if kind == "pops" else (od.uhsas_csca, 1054.)
+    setup = optical_geometry.load_optical_setup(kind)
+    channel = 'Collection' if kind == 'pops' else 'Collection 1'
     d = np.array([60., 200., 1000., 3000., 6000.])
-    coarse = fn(d, 1.8+0.001j, wl, geom=geom)
-    fine = fn(d, 1.8+0.001j, wl, geom=replace(geom, ring_step_deg=0.125))
+    coarse = od.setup_csca(d, 1.8+0.001j, setup)[channel]
+    fine = od.setup_csca(d, 1.8+0.001j, replace(setup, angular_step_deg=0.125))[channel]
     assert np.allclose(coarse, fine, rtol=2e-3, atol=0)
 
 
-def test_numpy_and_numba_and_parallel_paths_agree(monkeypatch):
+def test_numpy_and_numba_paths_agree(monkeypatch):
     d = [100., 500., 1000.]
-    for fn, parallel, geom, wl in [(od.pops_csca, od.pops_csca_parallel, od.POPSGeom(), 405.),
-                                    (od.uhsas_csca, od.uhsas_csca_parallel, od.UHSASGeom(), 1054.)]:
-        accelerated = fn(d, 1.6+.001j, wl, geom=geom)
-        threaded = parallel(d, 1.6+.001j, wl, geom=geom, n_jobs=2)
+    for kind in ('pops', 'uhsas'):
+        setup = optical_geometry.load_optical_setup(kind)
+        channel = 'Collection' if kind == 'pops' else 'Collection 1'
+        accelerated = od.setup_csca(d, 1.6+.001j, setup)[channel]
         with monkeypatch.context() as mp:
             mp.setattr(od, "_HAVE_NUMBA", False)
-            plain = fn(d, 1.6+.001j, wl, geom=geom)
+            plain = od.setup_csca(d, 1.6+.001j, setup)[channel]
         assert np.allclose(accelerated, plain, rtol=1e-12, atol=0)
-        assert np.array_equal(accelerated, threaded)
 
 
 def test_wavelength_size_scaling():
-    a = od.pops_csca([200.], 1.52+0j, 405., geom=od.POPSGeom())
-    b = od.pops_csca([400.], 1.52+0j, 810., geom=od.POPSGeom())
+    a = np.sum(list(od.setup_csca([200.], 1.52+0j, optical_geometry.pops_optical_setup(optical_geometry.POPSGeom(), wavelength_nm=405.)).values()), axis=0)
+    b = np.sum(list(od.setup_csca([400.], 1.52+0j, optical_geometry.pops_optical_setup(optical_geometry.POPSGeom(), wavelength_nm=810.)).values()), axis=0)
     assert b[0] == pytest.approx(4*a[0])
 
 
@@ -158,29 +160,30 @@ def test_same_ri_conversion_is_identity_even_for_oscillatory_curve():
 @pytest.mark.parametrize("kind", ["pops", "uhsas"])
 def test_small_lut_is_versioned_matches_kernel_and_cannot_be_overwritten(tmp_path, kind):
     path = tmp_path / f"{kind}.zarr"
-    geom, fn, wl = ((od.POPSGeom(), od.pops_csca, 405.) if kind == "pops"
-                     else (od.UHSASGeom(), od.uhsas_csca, 1054.))
+    geom, wl = (optical_geometry.POPSGeom(), 405.) if kind == "pops" else (optical_geometry.UHSASGeom(), 1054.)
+    setup = optical_geometry.load_optical_setup(kind)
+    channel = 'Collection' if kind == 'pops' else 'Collection 1'
     args = dict(D_range=(100., 1000., 6), n_range=(1.5, 1.6, .1),
                 k_values=(0., .001), chunks=(6, 2, 1), jobs_per_k=1)
-    od.build_sigma_lut(str(path), kind, wl, geom, **args)
-    lut = od.SigmaLUT(str(path))
+    optical_lut.build_sigma_lut(str(path), kind, wl, geom, **args)
+    lut = optical_lut.SigmaLUT(str(path))
     assert np.allclose(lut.sigma_curve(lut.Dg, 1.5, 0.),
-                       fn(lut.Dg, 1.5+0j, wl, geom=geom), rtol=1e-6, atol=0)
-    assert od.sigma_query_zarr(str(path), 100., 1.5, 0.) == pytest.approx(lut.SIG[0, 0, 0])
+                       od.setup_csca(lut.Dg, 1.5+0j, setup)[channel], rtol=1e-6, atol=0)
+    assert optical_lut.sigma_query_zarr(str(path), 100., 1.5, 0.) == pytest.approx(lut.SIG[0, 0, 0])
     with pytest.raises(FileExistsError):
-        od.build_sigma_lut(str(path), kind, wl, geom, **args)
+        optical_lut.build_sigma_lut(str(path), kind, wl, geom, **args)
     root = zarr.open(str(path), mode="r+")
-    assert root.attrs["optical_model_version"] == od.OPTICAL_MODEL_VERSION
+    assert root.attrs["optical_model_version"] == optical_geometry.OPTICAL_MODEL_VERSION
     assert root.attrs["build_complete"] is True
     # Removing version simulates a historical table without changing any data.
     del root.attrs["optical_model_version"]
     with pytest.raises(ValueError, match="Rebuild"):
-        od.SigmaLUT(str(path))
+        optical_lut.SigmaLUT(str(path))
     with pytest.raises(ValueError, match="Rebuild"):
-        od.sigma_query_zarr(str(path), 100., 1.5, 0.)
+        optical_lut.sigma_query_zarr(str(path), 100., 1.5, 0.)
     with pytest.warns(UserWarning, match="legacy"):
-        old = od.SigmaLUT(str(path), allow_legacy=True)
+        old = optical_lut.SigmaLUT(str(path), allow_legacy=True)
     assert np.array_equal(old.SIG, lut.SIG)
     root.attrs["build_complete"] = False
     with pytest.raises(ValueError, match="incomplete"):
-        od.SigmaLUT(str(path), allow_legacy=True)
+        optical_lut.SigmaLUT(str(path), allow_legacy=True)

@@ -11,7 +11,17 @@ from importlib import import_module
 __version__ = "0.1.0"
 
 _MODULE_EXPORTS = {
-    "optical_lut": (),
+    "optical_lut": (
+        "SigmaLUT", "sigma_query_zarr", "build_sigma_lut", "build_setup_sigma_lut",
+        "build_pops_sigma_lut", "build_uhsas_sigma_lut", "build_pcasp_sigma_lut",
+    ),
+    "optical_geometry": (
+        "load_optical_setup", "OpticalSetup", "IncidentBeam", "CollectionCone",
+        "CollectionChannel", "POPSGeom", "UHSASGeom", "PCASPGeom",
+        "pops_optical_setup", "uhsas_optical_setup", "pcasp_optical_setup",
+        "optical_setup_from_lut_metadata", "POPS_WAVELENGTH_NM",
+        "UHSAS_WAVELENGTH_NM", "PCASP_WAVELENGTH_NM", "RI_UHSAS_SRC", "RI_POPS_SRC",
+    ),
     "uncertainty": (
         "UncertaintyUnavailable",
         "blocked_mean_factor",
@@ -56,31 +66,10 @@ _MODULE_EXPORTS = {
         "growth_factor_from_kappa",
     ),
     "optical_diameter": (
-        "load_optical_setup",
-        "POPSGeom",
-        "UHSASGeom",
-        "PCASPGeom",
-        "pcasp_optical_setup",
-        "pcasp_csca",
-        "build_pcasp_sigma_lut",
-        "PCASP_WAVELENGTH_NM",
-        "pops_geometry_cache",
-        "uhsas_geometry_cache",
-        "pops_csca",
-        "pops_csca_parallel",
-        "uhsas_csca",
-        "uhsas_csca_parallel",
-        "build_sigma_lut",
-        "build_pops_sigma_lut",
-        "build_uhsas_sigma_lut",
-        "SigmaLUT",
-        "sigma_query_zarr",
+        "setup_csca", "setup_geometry_cache", "channel_geometry_cache",
+        "directional_cross_section",
         "make_monotone_sigma_interpolator",
         "convert_do_lut",
-        "POPS_WAVELENGTH_NM",
-        "UHSAS_WAVELENGTH_NM",
-        "RI_UHSAS_SRC",
-        "RI_POPS_SRC",
     ),
     "alignment": (
         "mse_overlap_sizedist",

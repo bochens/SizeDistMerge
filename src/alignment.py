@@ -7,7 +7,8 @@ from sklearn.metrics import mean_squared_error
 from scipy.optimize import differential_evolution
 
 from .utils import remap_dndlog_by_edges, mids_from_edges
-from .optical_diameter import SigmaLUT, convert_do_lut
+from .optical_lut import SigmaLUT
+from .optical_diameter import convert_do_lut
 
 
 __all__ = [

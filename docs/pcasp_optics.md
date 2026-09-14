@@ -27,7 +27,7 @@ the source index remains an explicit input when converting campaign data.
 
 ## Calculation and units
 
-`pcasp_csca` and `build_pcasp_sigma_lut` use the existing shared polarized
+`setup_csca` with the PCASP setup, and `build_pcasp_sigma_lut`, use the shared polarized
 Mie calculation for homogeneous spheres in air. They integrate the scattered
 power per unit solid angle over the collector. Units are square micrometers.
 Full-azimuth collection makes the integral independent of the chosen

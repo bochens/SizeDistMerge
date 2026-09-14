@@ -90,7 +90,7 @@ approximation, not a newly verified aperture location; it is off by default.
 Use a custom setup with measured directions for a different direct path.
 `uhsas_optical_setup()` describes two opposing collection channels, each
 with its own central excluded cone, and two equal counterpropagating beams.
-The old `pops_csca` and `uhsas_csca` interfaces remain compatible.
+Use `setup_csca` for either setup and select the named detector from its result.
 
 New LUTs store the complete serialized setup and selected response channels.
 `optical_setup_from_lut_metadata()` restores it for plotting. It also adapts

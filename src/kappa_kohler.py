@@ -1,3 +1,11 @@
+"""Water uptake and activation calculations using kappa-Köhler theory.
+
+Kappa describes how strongly a particle takes up water. The equilibrium
+functions use diameters in metres and saturation ratios (1.002 means 0.2%
+supersaturation). RH helpers also accept percent values; see _to_rh_frac.
+The older optical-coefficient helpers have separate unit conventions below.
+"""
+
 import numpy as np
 import scipy
 import os
@@ -27,7 +35,11 @@ _water_density = 997048 #g/m3
 _molar_mass_water = 18.01528
 
 def _to_rh_frac(RH):
-    """Accept RH as 0-1 or 0-100; return 0-1."""
+    """Treat RH above 1.5 as percent; otherwise leave it as a fraction.
+
+    Prefer fractions such as 0.8 for 80%. The automatic rule is ambiguous
+    at low percent humidity: 1.0 is interpreted as 100%, not 1%.
+    """
     RH = np.asarray(RH, float)
     return np.where(RH > 1.5, RH / 100.0, RH)
 
@@ -136,12 +148,13 @@ def calculate_critical_diameter_interpolated(aerosol_sizes, aerosol_size_dist, s
     aerosol_sizes = aerosol_sizes[non_nan_indices]
     aerosol_size_dist = aerosol_size_dist[non_nan_indices]
 
-    # Create an interpolation of the aerosol size distribution
+    # Find a size threshold whose larger particles sum to the measured CCN
+    # concentration. This assumes activation can be represented by one cutoff.
+    # The spectrum is dN/dlog10D; integrating against log10(D) gives concentration.
     original_interpolation = scipy.interpolate.interp1d(
         aerosol_sizes, aerosol_size_dist, kind='linear', bounds_error=False, fill_value="extrapolate"
     )
 
-    #print('Calculating critical dry diameter: Debug Information')
 
     for ss_i, an_ss in enumerate(super_saturations):
         a_ccnc = ccn_concentrations[ss_i]
@@ -169,33 +182,28 @@ def calculate_critical_diameter_interpolated(aerosol_sizes, aerosol_size_dist, s
                 # Perform numerical integration
                 integral = scipy.integrate.simpson(y=interpolated_dist, x=np.log10(fine_grid))
 
-                # Update bounds based on the integral value
+                # Too few particles above this cutoff: lower the cutoff to
+                # include more. Too many: raise it to exclude smaller particles.
                 if integral < a_ccnc:
                     upper_bound = mid_point
                 else:
                     lower_bound = mid_point
             else:
                 # Interpolation failed, stop the loop
-                #print(f"Interpolation failed at iteration {iteration_count}. Breaking out of loop.")
                 break
 
         # Check for convergence
         if iteration_count < max_iterations and upper_bound - lower_bound <= tolerance:
             crit_diameter = 10**((np.log10(lower_bound) + np.log10(upper_bound)) / 2)
         else:
-            #print(f"Reached max iterations or failed to converge for SS={an_ss:.4f}. Returning None.")
             crit_diameter = None
 
         critical_diameters.append(crit_diameter)
 
-        # Debugging information
+        # Retained no-op branches from the original diagnostic output.
         if crit_diameter is not None:
-            #print(f"Super Saturation: {an_ss:.4f}, CCN Concentration: {a_ccnc:.4f}, "
-            #      f"Critical Diameter: {crit_diameter:.4f}, Iterations: {iteration_count}")
             pass
         else:
-            #print(f"Super Saturation: {an_ss:.4f}, CCN Concentration: {a_ccnc:.4f}, "
-            #      f"Critical Diameter: None, Iterations: {iteration_count}")
             pass
 
     critical_diameters = np.array(critical_diameters, dtype=object)  # Use dtype=object to accommodate None
@@ -204,8 +212,9 @@ def calculate_critical_diameter_interpolated(aerosol_sizes, aerosol_size_dist, s
 
 def calculate_kappa_fitting(Dc, Sc):
     '''
-    Sc is the critical super saturation
-    Dc is the critical diameter
+    Fit kappa separately for each (Dc, Sc) pair.
+    Dc is the dry activation diameter in metres. Sc is the saturation ratio,
+    not supersaturation in percent: use 1.002 for 0.2% supersaturation.
     '''
     def func_to_fit(Dd, kappa):
         _, peak_S_D = find_peak_S_D_binary_search(Dd, kappa)
@@ -218,6 +227,10 @@ def calculate_kappa_fitting(Dc, Sc):
     return kappa_list
 
 def calculate_kappa(Dc, Sc, x0=0.001, x1=2.0, max_expand=5):
+    """Find kappa for dry diameters Dc [m] and saturation ratios Sc.
+
+    Vary kappa until the peak of the equilibrium curve matches each Sc.
+    """
     kappa_list = []
     for i in range(len(Sc)):
         def f(k): 
@@ -226,7 +239,8 @@ def calculate_kappa(Dc, Sc, x0=0.001, x1=2.0, max_expand=5):
 
         a, b = x0, x1
         fa, fb = f(a), f(b)
-        # expand b until f(a) and f(b) have opposite sign
+        # A root needs one trial below the target and one above it.
+        # Increase the upper kappa limit until those two trials enclose a root.
         for _ in range(max_expand):
             if fa*fb < 0:
                 break
@@ -246,8 +260,8 @@ def calculate_kappa(Dc, Sc, x0=0.001, x1=2.0, max_expand=5):
 def calculate_critical_diameter(kappa_list, Sc): #
     '''
     Finding the smallest particle diameter with a certain kappa that will activate under an Sc.
-    Given a list of kappa values and the corresponding critical supersaturations (Sc),
-    this function returns the calculated critical diameters (Dc).
+    Sc is a saturation ratio (1.002 for 0.2% supersaturation).
+    Returns dry diameters in metres.
     '''
     Dc_list = []
     for i in range(len(Sc)):
@@ -304,7 +318,7 @@ def calculate_wet_diameter(
     dry_diameter,
     kappa,
     *,
-    # NEW: define what "dry_diameter" means (reference RH)
+    # A reported "dry" diameter may still contain water at the reference RH.
     dry_rh=0.0,              # 0-1 or 0-100. If 0, dry_diameter is true dry (RH→0).
     surface_tension=0.072,   # J/m^2
     Mw=18.01528,             # g/mol
@@ -326,6 +340,8 @@ def calculate_wet_diameter(
         interpret `dry_diameter` as diameter at RH = dry_rh (a reference RH),
         first invert to true dry D0, then grow to RH.
 
+    Diameters are in metres. RH must be below saturation; this finds an
+    equilibrium particle size, not growth of an activated cloud droplet.
     Supports broadcasting among RH and dry_diameter.
     """
     RHf = _to_rh_frac(RH)
@@ -350,14 +366,15 @@ def calculate_wet_diameter(
         raise ValueError("RH must be in (0,1) (or 0-100%)")
 
     def S_eq6(Dw, Dd_scalar):
-        # Petters & Kreidenweis Eq.6 as you already have
+        # Use the same equilibrium equation and physical constants in each solve.
         return S_petter_and_Kreidenweis_2010_EQ6(
             Dw, Dd_scalar, kappa,
             surface_tension=surface_tension, Mw=Mw, T=T, density=density, R=R
         )
 
     def _solve_wet_from_true_dry(RH_target, Dd0):
-        # solve f(Dw)=S(Dw,Dd0)-RH_target = 0 for Dw>=Dd0
+        # Find the water-swollen diameter whose equilibrium humidity matches
+        # the requested RH. It must be larger than the water-free diameter.
         def f(Dw):
             return float(S_eq6(Dw, Dd0) - RH_target)
 
@@ -382,14 +399,13 @@ def calculate_wet_diameter(
         return float(brentq(f, a, b, xtol=xtol, rtol=rtol, maxiter=maxiter))
 
     def _solve_true_dry_from_ref(RH_ref, Dref_val):
-        # find Dd0 such that wet(Dd0,RH_ref)=Dref_val
-        # i.e., g(Dd0)=Dw(RH_ref;Dd0)-Dref_val = 0
+        # The reference size may already include water. Find the water-free
+        # size that would grow back to that reference size at its known RH.
         def g(Dd0):
             Dw = _solve_wet_from_true_dry(RH_ref, Dd0)
             return Dw - Dref_val
 
-        # bracket Dd0: must be <= Dref_val (for RH_ref>0), but allow equality
-        # pick a very small lower bound relative to Dref_val
+        # Search below the reference diameter: removing water cannot enlarge it.
         a = Dref_val / max_factor
         b = Dref_val  # should be above/boundary
 
@@ -436,7 +452,7 @@ def calculate_dry_diameter(
     wet_diameter,
     kappa,
     *,
-    # NEW: define what "dry" means (reference RH for the returned diameter)
+    # Return the size at this reference RH, which need not be completely dry.
     dry_rh=0.0,              # 0-1 or 0-100. If 0, return true dry D0 (RH→0).
     surface_tension=0.072,   # J/m^2
     Mw=18.01528,             # g/mol
@@ -456,7 +472,8 @@ def calculate_dry_diameter(
     - If dry_rh > 0: returns D_ref such that wet(D0,RH_ref)=D_ref, where D0 is the
       true dry inferred from (RH, wet_diameter).
 
-    Supports broadcasting among RH and wet_diameter.
+    Input and returned diameters are in metres. Supports broadcasting among
+    RH and wet_diameter.
     """
     RHf = _to_rh_frac(RH)
     RHref = float(_to_rh_frac(dry_rh))
@@ -486,7 +503,8 @@ def calculate_dry_diameter(
         )
 
     def _solve_true_dry_from_wet(RH_obs, Dw_val):
-        # solve h(Dd0)=S(Dw_val,Dd0)-RH_obs=0 for Dd0 <= Dw_val
+        # Keep the observed wet size fixed. Vary the water-free size until the
+        # equilibrium equation predicts the observed relative humidity.
         def h(Dd0):
             return float(S_eq6(Dw_val, Dd0) - RH_obs)
 
@@ -557,75 +575,105 @@ def calculate_dry_diameter(
 
     return out
 
+def _humidified_diameters_nm(dry_sizes, rh, kappa):
+    """Convert nm to metres for water uptake, then return wet sizes in nm."""
+    dry_sizes = np.asarray(dry_sizes, dtype=float)
+    humidity = np.asarray(_to_rh_frac(rh), dtype=float)
+    if humidity.ndim != 0 or not np.isfinite(humidity) or not 0 < humidity < 1:
+        raise ValueError("rh must be a scalar between 0 and 1 (or 0 and 100%)")
+    if (dry_sizes.ndim != 1 or dry_sizes.size < 2
+            or np.any(~np.isfinite(dry_sizes)) or np.any(dry_sizes <= 0)
+            or np.any(np.diff(dry_sizes) <= 0)):
+        raise ValueError("dry_sizes must contain at least two increasing positive diameters in nm")
+    if not np.isfinite(kappa) or kappa < 0:
+        raise ValueError("kappa must be finite and nonnegative")
+    # With no water uptake, the particle stays dry. The equilibrium root
+    # solver cannot bracket this limiting case just above the dry diameter.
+    if kappa == 0:
+        return dry_sizes.copy(), float(humidity)
+    wet_sizes_m = calculate_wet_diameter(float(humidity), dry_sizes * 1e-9, kappa)
+    return wet_sizes_m * 1e9, float(humidity)
+
+
+def _humidity_optical_ratios(dry_sizes, wet_sizes, spectrum, dry_ri, wet_ri, wavelength):
+    # Each dry-size interval represents the same particles before and after
+    # growth. Change their optical cross-sections, but integrate both curves
+    # over the original dry-size coordinate to preserve particle numbers.
+    wet_coefficients = calculate_coefficients(
+        wet_sizes, spectrum, wet_ri, wavelength, integration_sizes=dry_sizes)
+    dry_coefficients = calculate_coefficients(dry_sizes, spectrum, dry_ri, wavelength)
+    if np.any(~np.isfinite(dry_coefficients)) or np.any(np.asarray(dry_coefficients) <= 0):
+        raise ValueError("Enhancement is undefined when a dry optical coefficient is zero or invalid")
+    return tuple(float(wet / dry) for wet, dry in zip(wet_coefficients, dry_coefficients))
+
+
 def calculate_humidification_factor(dry_sizes, dndlogdps, rh, kappa, wavelength, dry_ri_n, dry_ri_k, water_ri_n = 1.33):
-    '''
-        dry_sizes : an array in nanometers
-        dndlogdps : an array
-        rh        : a scalar
-        kappa     : a scalar
-        Wavelength: in nanometers
-    '''
+    """Return wet/dry extinction, scattering and backscatter ratios.
 
-    wet_sizes      = calculate_wet_diameter(rh, dry_sizes, kappa)
-    dry_v_raitos   = dry_sizes**3 / wet_sizes**3
-    water_v_ratios = 1 - dry_v_raitos
-    wet_ri_ns      = dry_ri_n * dry_v_raitos + water_ri_n * water_v_ratios
-    #wet_ri_ns      = dry_ri_n
-    wet_ris    = wet_ri_ns - dry_ri_k * 1j
-    dry_ri     = dry_ri_n  - dry_ri_k * 1j
-
-    wet_extinction_coeff, wet_scattering_coeff, wet_bckscatter_coeff = calculate_coefficients(wet_sizes, dndlogdps, wet_ris, wavelength)
-    dry_extinction_coeff, dry_scattering_coeff, dry_bckscatter_coeff = calculate_coefficients(dry_sizes, dndlogdps, dry_ri , wavelength)
-
-    ext_humidificaiton_factor = wet_extinction_coeff/dry_extinction_coeff
-    sca_humidificaiton_factor = wet_scattering_coeff/dry_scattering_coeff
-    bck_humidificaiton_factor = wet_bckscatter_coeff/dry_bckscatter_coeff
-
-    return ext_humidificaiton_factor, sca_humidificaiton_factor, bck_humidificaiton_factor
+    dry_sizes and wavelength are in nm; dndlogdps is dN/dlog10(dry diameter).
+    RH accepts a fraction or percent (prefer 0.8 for 80%). Particles are
+    homogeneous spheres whose dry diameters refer to water-free particles.
+    The real refractive index is volume-mixed with water. For compatibility,
+    the imaginary index stays at dry_ri_k: absorption dilution is NOT modeled.
+    """
+    dry_sizes = np.asarray(dry_sizes, dtype=float)
+    wet_sizes, _humidity = _humidified_diameters_nm(dry_sizes, rh, kappa)
+    dry_volume_fraction = (dry_sizes / wet_sizes)**3
+    wet_real_index = dry_ri_n * dry_volume_fraction + water_ri_n * (1 - dry_volume_fraction)
+    wet_ri = wet_real_index - dry_ri_k * 1j
+    dry_ri = dry_ri_n - dry_ri_k * 1j
+    return _humidity_optical_ratios(dry_sizes, wet_sizes, dndlogdps, dry_ri, wet_ri, wavelength)
 
 def calculate_humidification_factor_ammonium_sulfate(dry_sizes, dndlogdps, rh, kappa, wavelength):
+    """Return wet/dry optical ratios using the stored ammonium-sulfate RI curve.
+
+    Diameters and wavelength are in nm; the spectrum is dN/dlog10(dry diameter).
+    RH accepts fractions or percent. Retains the existing Cotterell et al.
+    (2017) values and the reference RI extrapolated to RH=0.3. This reference
+    is not a verified water-free RI, and the curve has no wavelength dependence.
+    Values outside its 0.4--1.0 RH table are extrapolated, not measurements.
+    This helper does not model abrupt changes when salt crystallizes or dissolves.
+    """
+
+    table_humidity = np.array([0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+    table_real_index = np.array([1.453, 1.44, 1.428, 1.417, 1.403, 1.379, 1.335])
+    index_curve = CubicSpline(table_humidity, table_real_index, bc_type='not-a-knot')
+
+    dry_sizes = np.asarray(dry_sizes, dtype=float)
+    wet_sizes, humidity = _humidified_diameters_nm(dry_sizes, rh, kappa)
+    dry_ri = complex(index_curve(0.3))
+    wet_ri = complex(index_curve(humidity))
+    return _humidity_optical_ratios(dry_sizes, wet_sizes, dndlogdps, dry_ri, wet_ri, wavelength)
+
+def calculate_coefficients(sizes, dndlogdps, ri, wavelength, *, integration_sizes=None):
     '''
-        Cotterell er al. 2017
-        
-        dry_sizes : an array
-        dndlogdps : an array
-        rh        : a scalar
-        kappa     : a scalar
-        Wavelength: in nanometers
-    '''
+        Integrate extinction, scattering and backscatter over dN/dlog10D.
 
-    as_rh     = np.array([0.4  , 0.5 , 0.6  , 0.7  , 0.8  , 0.9  , 1.0  ])
-    as_realri = np.array([1.453, 1.44, 1.428, 1.417, 1.403, 1.379, 1.335])
-    cs = CubicSpline(as_rh, as_realri, bc_type='not-a-knot')
-
-    wet_sizes = calculate_wet_diameter(rh, dry_sizes, kappa)
-    dry_ri_n = cs(0.3)
-    dry_ri_k = 0
-
-    wet_ri_ns = cs(rh)
-    
-    wet_ris    = wet_ri_ns - dry_ri_k * 1j
-    dry_ri     = dry_ri_n  - dry_ri_k * 1j
-
-    wet_extinction_coeff, wet_scattering_coeff, wet_bckscatter_coeff = calculate_coefficients(wet_sizes, dndlogdps, wet_ris, wavelength)
-    dry_extinction_coeff, dry_scattering_coeff, dry_bckscatter_coeff = calculate_coefficients(dry_sizes, dndlogdps, dry_ri , wavelength)
-
-
-    ext_humidificaiton_factor = wet_extinction_coeff/dry_extinction_coeff
-    sca_humidificaiton_factor = wet_scattering_coeff/dry_scattering_coeff
-    bck_humidificaiton_factor = wet_bckscatter_coeff/dry_bckscatter_coeff
-
-
-    return ext_humidificaiton_factor, sca_humidificaiton_factor, bck_humidificaiton_factor
-
-def calculate_coefficients(sizes, dndlogdps, ri, wavelength):
-    '''
-        Calculate extinction coefficient, scattering coefficient, or backscatter coefficient
+        sizes and wavelength must share a length unit. No conversion to m^-1
+        is applied: with nm and cm^-3, results are in nm^2 cm^-3.
+        integration_sizes optionally supplies the diameter coordinate on which
+        dndlogdps is defined. Use dry sizes here when sizes contains wet optical
+        diameters. By default both coordinates are sizes, as in ordinary use.
+        Backscatter uses the Mie radar-backscatter convention, not per steradian.
     '''
     miepython = _miepython_module()
 
+    sizes = np.asarray(sizes, dtype=float)
+    dndlogdps = np.asarray(dndlogdps, dtype=float)
+    integration_sizes = sizes if integration_sizes is None else np.asarray(integration_sizes, dtype=float)
+    if sizes.ndim != 1 or sizes.size < 2 or dndlogdps.shape != sizes.shape or integration_sizes.shape != sizes.shape:
+        raise ValueError("sizes, dndlogdps and integration_sizes must be matching 1D arrays with at least two values")
+    for diameter_grid in (sizes, integration_sizes):
+        if np.any(~np.isfinite(diameter_grid)) or np.any(diameter_grid <= 0) or np.any(np.diff(diameter_grid) <= 0):
+            raise ValueError("Diameter coordinates must be finite, positive and increasing")
+    if not np.isfinite(wavelength) or wavelength <= 0:
+        raise ValueError("wavelength must be finite and positive")
+    if np.any(np.isinf(dndlogdps)) or np.any(dndlogdps < 0) or np.sum(np.isfinite(dndlogdps)) < 2:
+        raise ValueError("Spectrum needs at least two finite nonnegative values; use NaN for missing values")
+    if np.any(~np.isfinite(ri)):
+        raise ValueError("Refractive index must be finite")
     size_parameters = np.pi * sizes/wavelength
-    qexts, qscas, qbcks, gs = miepython.mie(ri, size_parameters)
+    qexts, qscas, qbcks, _asymmetry = miepython.efficiencies_mx(ri, size_parameters)
 
 
     exts_times_dndlogdp = np.pi * (sizes**2)/4 * qexts * dndlogdps
@@ -634,9 +682,9 @@ def calculate_coefficients(sizes, dndlogdps, ri, wavelength):
 
     non_nan_index = np.where(~np.isnan(dndlogdps))[0]
 
-    extinction_coeff = scipy.integrate.simpson(y = exts_times_dndlogdp[non_nan_index], x = np.log10(sizes[non_nan_index]))
-    scattering_coeff = scipy.integrate.simpson(y = scas_times_dndlogdp[non_nan_index], x = np.log10(sizes[non_nan_index]))
-    bckscatter_coeff = scipy.integrate.simpson(y = bcks_times_dndlogdp[non_nan_index], x = np.log10(sizes[non_nan_index]))
+    extinction_coeff = scipy.integrate.simpson(y = exts_times_dndlogdp[non_nan_index], x = np.log10(integration_sizes[non_nan_index]))
+    scattering_coeff = scipy.integrate.simpson(y = scas_times_dndlogdp[non_nan_index], x = np.log10(integration_sizes[non_nan_index]))
+    bckscatter_coeff = scipy.integrate.simpson(y = bcks_times_dndlogdp[non_nan_index], x = np.log10(integration_sizes[non_nan_index]))
 
     return extinction_coeff, scattering_coeff, bckscatter_coeff
 
@@ -646,9 +694,9 @@ def kappa_from_growth_factor(
     *,
     Dd=None,                 # optional dry diameter (meters) for Kelvin term
     surface_tension=0.072,   # J/m^2
-    Mw=18.01528,             # g/mol (keep consistent with your code)
+    Mw=18.01528,             # g/mol
     T=298.15,                # K
-    density=_water_density,          # g/m^3 (water density in your units)
+    density=_water_density,          # g/m^3
     R=8.3145,                # J/(mol K)
 ):
     """
@@ -661,7 +709,8 @@ def kappa_from_growth_factor(
     Assumptions:
       - Solution is at equilibrium (subsaturated).
       - If you provide Dd (meters), Kelvin term exp(A/Dw) is included.
-      - If Dd is None, Kelvin term is neglected (A=0), which is usually fine for accumulation mode.
+      - If Dd is None, neglect the Kelvin term: the effect of surface curvature
+        on equilibrium humidity. The caller must decide if that is appropriate.
 
     Returns:
       kappa (same broadcasted shape as GF and RH)
@@ -682,14 +731,15 @@ def kappa_from_growth_factor(
     if np.any(RHf <= 0.0) or np.any(RHf >= 1.0):
         raise ValueError("RH must be in (0,1) (or 0-100%)")
 
-    # Kelvin term factor: exp(A / Dw) where Dw = Dd * GF
+    # Curvature raises the equilibrium humidity, especially for small particles.
+    # Include this effect only when an actual dry diameter is supplied.
     if Dd is None:
         kelvin = 1.0
     else:
         Dd = np.asarray(Dd, float)
         if np.any(~np.isfinite(Dd)) or np.any(Dd <= 0.0):
             raise ValueError("Dd must be finite and > 0 (meters)")
-        # A (meters) consistent with your Eq.6 implementation:
+        # A has units of metres, so A / wet diameter is dimensionless.
         A = (4.0 * surface_tension * Mw) / (R * T * density)
         # Broadcast to match
         RHf, GF, Dd = np.broadcast_arrays(RHf, GF, Dd)
@@ -723,8 +773,9 @@ def growth_factor_from_kappa(
     R=8.3145,                # J/(mol K)
 ):
     """
-    Forward (no root-solve): compute GF from kappa and RH neglecting Kelvin if Dd is None.
-    With Kelvin term, need a root solve; so for Dd!=None we raise.
+    Compute wet/dry diameter ratio directly, ignoring the effect of curvature.
+    With a dry diameter supplied, that effect would require a numerical solve;
+    this helper instead raises. Use calculate_wet_diameter for that case.
 
     Without Kelvin:
       RH = (GF^3 - 1) / (GF^3 - (1-kappa))

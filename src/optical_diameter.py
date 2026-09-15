@@ -290,6 +290,14 @@ def make_monotone_sigma_interpolator(
         x = np.asarray(representative_log_diameters)
         y = np.asarray(representative_log_signals)
         sample_weight = np.asarray(representative_counts, float)
+    elif sample_weight is not None:
+        # Each supplied weight belongs to the diameter/signal in the same row.
+        # Keep those rows together when sorting; otherwise a different point
+        # can receive the strongest weight.
+        sample_weight = np.asarray(sample_weight, dtype=float)
+        if sample_weight.shape != diameters.shape:
+            raise ValueError("sample_weight must be 1D with one value per diameter")
+        sample_weight = sample_weight[order]
 
     isotonic_fit = IsotonicRegression(increasing=bool(increasing), out_of_bounds="clip")
     # Isotonic regression moves the representative signals as little as possible

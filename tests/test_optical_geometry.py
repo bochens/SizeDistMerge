@@ -144,6 +144,57 @@ def test_forward_and_inverse_use_identical_curve_with_plateaus(increasing):
     assert np.isnan(inv(1e100))
 
 
+@pytest.mark.parametrize('increasing', [True, False])
+@pytest.mark.parametrize('response_bins', [None, 0, 1])
+def test_custom_smoothing_weights_follow_reordered_observations(increasing, response_bins):
+    diameters = np.array([100., 200., 300., 400.])
+    signals = np.array([1., 4., 2., 6.])
+    weights = np.array([1., 10., 1., 1.])
+    if not increasing:
+        signals = 1 / signals
+    permutation = np.array([0, 2, 1, 3])
+    forward, inverse = od.make_monotone_sigma_interpolator(
+        diameters, signals, sample_weight=weights,
+        increasing=increasing, response_bins=response_bins)
+    reordered, reordered_inverse = od.make_monotone_sigma_interpolator(
+        diameters[permutation], signals[permutation], sample_weight=weights[permutation],
+        increasing=increasing, response_bins=response_bins)
+    query = np.geomspace(100., 400., 31)
+    np.testing.assert_array_equal(reordered(query), forward(query))
+    np.testing.assert_array_equal(reordered_inverse(forward(query)), inverse(forward(query)))
+    # Verify that the dominant weight still belongs to the 200 nm observation.
+    expected_plateau = np.exp((10*np.log(signals[1]) + np.log(signals[2])) / 11)
+    assert reordered(np.sqrt(200.*300.)) == pytest.approx(expected_plateau)
+
+
+def test_grouped_smoothing_still_uses_interval_counts_not_custom_weights():
+    diameters = np.geomspace(100., 400., 31)
+    signals = diameters**2 * np.exp(.5*np.sin(np.arange(31)))
+    permutation = np.arange(31)[::-1]
+    expected, _ = od.make_monotone_sigma_interpolator(diameters, signals, response_bins=10)
+    actual, _ = od.make_monotone_sigma_interpolator(
+        diameters[permutation], signals[permutation],
+        sample_weight=np.arange(1., 32.), response_bins=10)
+    query = np.geomspace(120., 350., 25)
+    np.testing.assert_array_equal(actual(query), expected(query))
+
+
+def test_uniform_smoothing_weights_keep_existing_behavior():
+    diameters = np.array([100., 300., 200., 400.])
+    signals = np.array([1., 2., 4., 6.])
+    expected, _ = od.make_monotone_sigma_interpolator(diameters, signals)
+    actual, _ = od.make_monotone_sigma_interpolator(diameters, signals, sample_weight=[2., 2., 2., 2.])
+    query = np.geomspace(100., 400., 31)
+    np.testing.assert_array_equal(actual(query), expected(query))
+
+
+@pytest.mark.parametrize('weights', [2., [1., 2., 3.], [[1., 2., 3., 4.]]])
+def test_custom_smoothing_weights_require_one_value_per_input_row(weights):
+    with pytest.raises(ValueError, match='one value per diameter'):
+        od.make_monotone_sigma_interpolator(
+            [100., 300., 200., 400.], [1., 2., 4., 6.], sample_weight=weights)
+
+
 def test_same_ri_conversion_is_identity_even_for_oscillatory_curve():
     class ToyLUT:
         Dg = np.geomspace(30., 6000., 1000)

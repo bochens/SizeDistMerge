@@ -27,13 +27,19 @@ flowchart TD
     W --> MASK["Accepted directions: A(θ,φ); combine cones and remove exclusions"]
     MASK --> PHI["Integrate over φ analytically:<br/>W⊥ = ∫ A cos²φ dφ<br/>W∥ = ∫ A sin²φ dφ"]
     B --> P["For each n, k pair: evaluate the diameter grid"]
-    P --> I["setup_csca() → _collected_cross_section()"]
-    I --> M["mie.phase_matrix(): x = πD/λ, evaluated at cos θ"]
+    P --> I["setup_csca(..., _cache=caches)"]
+    PHI --> I
+    I --> ENTRY
+    subgraph PARTICLE["Inside _collected_cross_section(D, m, wavelength, cache)"]
+    ENTRY["Receive diameter, refractive index, wavelength, and cache"]
+    ENTRY --> M["mie.phase_matrix(): x = πD/λ, evaluated at cos θ"]
     M --> INT["I⊥ = P11 − P12; I∥ = P11 + P12"]
     INT --> F["F(θ) = I⊥ W⊥ + I∥ W∥"]
-    PHI --> F
+    ENTRY --> CW["Read cache.perp_phi and cache.parallel_phi"]
+    CW --> F
     F --> THETA["Integrate over θ numerically:<br/>J = ∫ F(θ) sin θ dθ"]
     THETA --> AREA["σ_beam = π(D/2)² J"]
+    end
     AREA --> SUM["Weight and sum incident beams:<br/>σ_detector = ∑ f_beam σ_beam"]
     SUM --> Z["Saved LUT: σ(D, n, k) and optical metadata"]
 ```
@@ -71,6 +77,19 @@ These are `cache.perp_phi` and `cache.parallel_phi`. The integrals use exact
 antiderivatives over the accepted φ intervals; the circular-cone and full-azimuth
 special cases use equivalent closed-form weights. They can be reused across
 diameters and refractive indices because they depend only on the optical setup.
+
+The cache is an actual input to `_collected_cross_section`, not a separate step
+applied after that function returns. The function boundary in the figure encloses
+the Mie evaluation, use of φ weights, θ integration, and projected-area factor.
+The relevant call and calculation are:
+
+```python
+# In setup_csca():
+_collected_cross_section(d, m_particle, setup.wavelength_nm, cache)
+
+# Inside _collected_cross_section():
+phi_integral = perpendicular * cache.perp_phi + parallel * cache.parallel_phi
+```
 
 The scattering calculation supplies \(I_\perp=P_{11}-P_{12}\) and
 \(I_\parallel=P_{11}+P_{12}\), combines them with those weights, and then

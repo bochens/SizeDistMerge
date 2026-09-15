@@ -1,6 +1,6 @@
 // Render from docs/figures: dot -Tsvg optical_lut_workflow.dot -o optical_lut_workflow.svg
 digraph lut {
-  graph [rankdir=TB, bgcolor="white", pad="0.15", nodesep="0.3", ranksep="0.38", splines=ortho,
+  graph [rankdir=TB, newrank=true, bgcolor="white", pad="0.15", nodesep="0.3", ranksep="0.38", splines=ortho,
          label="LUT calculation", labelloc=t, fontname="Helvetica-Bold", fontsize=17];
   node [shape=box, style="rounded,filled", fillcolor="#f4f7fa", color="#a8b6c2", fontname="Helvetica", fontsize=12, margin="0.13,0.10"];
   edge [color="#647581", arrowsize=0.7, penwidth=1.1];
@@ -15,20 +15,29 @@ digraph lut {
   mask [label="Resolve accepted azimuths at each θ\nA(θ,φ) = 1 inside collected directions, 0 outside\nCombine collection cones; remove exclusions"];
   phi [label=<Integrate over φ analytically (0 to 2π)<BR/>W<SUB>⊥</SUB>(θ) = ∫ A(θ,φ) cos<SUP>2</SUP>φ dφ<BR/>W<SUB>∥</SUB>(θ) = ∫ A(θ,φ) sin<SUP>2</SUP>φ dφ>];
   pairs [label="For each n, k pair\nEvaluate the diameter grid"];
-  integration [label="setup_csca() → _collected_cross_section()\nCalculate the detector response"];
+  integration [label="setup_csca(..., _cache=caches)\nSelect the cache for this detector and beam"];
+  subgraph cluster_particle {
+  label="Inside _collected_cross_section(D, m, wavelength, cache)";
+  fontname="Helvetica-Bold"; fontsize=13; color="#a8b6c2"; style="rounded"; margin=16;
+  entry [label="Inputs received by this function\nD, m, wavelength, cache"];
+  weights [label="Read the φ-integrated weights from cache\nW⊥ = cache.perp_phi\nW∥ = cache.parallel_phi", fillcolor="#e5f0f4"];
   mie [label="mie.phase_matrix(norm=\"qsca\")\nx = πD/λ; evaluate at cos θ"];
   intensity [label="Polarized Mie intensity terms\nI⊥(θ) = P11 − P12\nI∥(θ) = P11 + P12"];
   combine [label="Scattering after φ integration\nF(θ) = I⊥(θ) W⊥(θ) + I∥(θ) W∥(θ)"];
   theta [label="Integrate over θ numerically (0 to π)\nJ = ∫ F(θ) sin θ dθ\nTrapezoidal rule on the angular grid"];
   area [label="Convert efficiency to cross-section\nσ_beam = π(D/2)² J\nUse D in µm here to obtain µm²"];
+  }
   beams [label="Combine the incident beams\nσ_detector = ∑ f_beam σ_beam\nf_beam = fraction of total incident irradiance"];
   output [label="Saved LUT · Zarr\nσ(D, n, k) and optical metadata", fillcolor="#eaf1e8", penwidth=1.5];
   toml -> load;
   {rank=same; load; diameter; real; imag; detector;}
   load -> build; diameter -> build; real -> build; imag -> build; detector -> build;
   build -> cache; build -> pairs;
-  pairs -> integration -> mie -> intensity -> combine;
-  cache -> mask -> phi -> combine;
-  {rank=same; intensity; phi;}
+  pairs -> integration;
+  cache -> mask -> phi -> integration;
+  integration -> entry;
+  entry -> mie -> intensity -> combine;
+  entry -> weights -> combine;
+  {rank=same; intensity; weights;}
   combine -> theta -> area -> beams -> output;
 }

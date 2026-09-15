@@ -71,6 +71,26 @@ def test_new_toml_name_requires_no_python_preset(tmp_path):
     assert setup.response_channel == 'Collection'
 
 
+@pytest.mark.parametrize('name,filename,diameter_range', [
+    ('pops', 'pops_sigma_col_405nm.zarr', (60., 6000.)),
+    ('uhsas', 'uhsas_sigma_col_1054nm.zarr', (30., 6000.)),
+    ('pcasp', 'pcasp_sigma_col_632p8nm.zarr', (60., 6000.)),
+    ('grimm_11d_unpolarized_assumed', 'grimm_11d_unpolarized_assumed_655nm.zarr', (200., 40000.)),
+])
+def test_packaged_200k_grids_and_saved_setup(name, filename, diameter_range):
+    # Inspect coordinates and metadata without loading four full scattering arrays.
+    import zarr
+    root = zarr.open_group(ROOT/'lut'/filename, mode='r')
+    assert root.attrs['build_complete'] is True
+    assert root['sigma_col'].shape == (1000, 1001, 200)
+    np.testing.assert_array_equal(root['coords/D_nm'][:], np.geomspace(*diameter_range, 1000))
+    np.testing.assert_array_equal(root['coords/n'][:], np.arange(1.30, 1.80+1e-12, .0005))
+    np.testing.assert_array_equal(root['coords/k'][:], np.r_[0., np.geomspace(1e-4, .8, 199)])
+    setup = optical_geometry.load_optical_setup(name)
+    assert optical_geometry.optical_setup_from_lut_metadata(root.attrs) == setup
+    assert root.attrs['response_channels'] == [setup.response_channel]
+
+
 def test_installed_style_settings_and_import_order(tmp_path):
     # Copy only source and settings, not the large LUT data. This simulates
     # an installation with no checkout/pyproject.toml beside the package.

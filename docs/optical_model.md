@@ -124,13 +124,10 @@ refactor, so this change alone does not require rebuilding LUTs.
 
 ## Experimental LAS 3340-family option
 
-The `las_uhsas_proxy_*.toml` settings provide a **test hypothesis**, not
-a verified LAS aperture. It uses the UHSAS circular annular openings at the
-LAS wavelength of 633 nm. The required polarization choice is `unpolarized`,
-`perpendicular`, or `parallel` (relative to the central beam/collector plane).
-Unpolarized illumination is represented by equal incoherent orthogonal
-components, and the two detector channels remain separate. Use the generic
-`setup_csca` and `build_setup_sigma_lut` functions with this setup.
+LAS is not included among the distributed instrument presets. Earlier
+exploratory models borrowed UHSAS openings at the LAS wavelength of 633 nm
+and varied polarization. Those models are unverified hypotheses, not a
+documented LAS configuration; they remain local research material.
 
 The TSI 3340 manual, chapter 5, confirms opposing side collectors, a 633 nm
 cavity, and separate detector gain ranges, but does not give the aperture
@@ -141,11 +138,9 @@ are for LAS 3340A, not a verification that 3340 and 3340A optics are identical.
 The unpolarized-laser patent listed in the manual is a motivation for a
 sensitivity case, not proof of the instrument's delivered polarization.
 
-`local/notebooks/las3340_optical_model.ipynb` (not distributed) compares all three polarization cases
-against Moore's original supplementary PSL diameter measurements, checks
-angular refinement, and builds a small experimental table under
-`outputs/las3340_proxy/`. It does not install a production LUT, assume a
-universal calibration refractive index, or change existing instruments.
+Exploratory comparisons do not establish a production LAS LUT or a universal
+calibration refractive index. Custom settings can still be supplied through
+an explicit TOML path when their assumptions are appropriate for the study.
 
 - [TSI 3340 manual](https://www.kenelec.com.au/wp-content/uploads/2016/06/TSI_3340_Manual.pdf)
 - [Moore et al. (2021)](https://doi.org/10.5194/amt-14-4517-2021)
@@ -200,12 +195,15 @@ restore the historical inverse algorithm. Exact historical reproduction needs
 the historical code as well. Production must use newly built and reviewed
 tables at explicit paths. Do not resume a run made with old LUTs into new output.
 
-The packaged tables contain 1000 logarithmically spaced diameters (60--6000 nm
-for POPS; 30--6000 nm for UHSAS), 1001 real refractive indices from 1.30 to 1.80,
-and 32 imaginary-index values from 0 to 0.8, including an exact 0.001 entry.
-The angular step is at most 0.25 degrees. Rebuild them with
-`notebooks/build_optical_luts_example.ipynb`; the instrument detection
-range is narrower than the calculation grid.
+The packaged tables contain 1000 logarithmically spaced diameters, 1001 real
+refractive indices from 1.30 to 1.80, and 200 imaginary-index values: zero plus
+199 logarithmically spaced values from 0.0001 to 0.8. The positive grid does
+not force an exact 0.001 entry; intermediate values use LUT interpolation.
+The diameter ranges are 60--6000 nm for POPS and PCASP, 30--6000 nm for UHSAS,
+and 200--40000 nm for the provisional GRIMM model. Angular steps are 0.25
+degrees except GRIMM, which uses 0.125 degrees. The instrument detection
+range is not the calculation grid. See [LUT provenance and verification](lut_provenance.md)
+and `notebooks/build_optical_luts_example.ipynb` for reproduction and limitations.
 
 ## Verification boundary
 

@@ -18,6 +18,8 @@ dist/
 /local/
 /outputs/
 /tmp/
+# In-progress LUTs must not be published before verification and promotion.
+/lut/rebuild_*/
 
 # Only reusable examples are published from notebooks/.
 /notebooks/*

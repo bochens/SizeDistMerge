@@ -124,13 +124,10 @@ def test_packaged_pcasp_lut():
     root = zarr.open_group(path, mode="r")
     assert root.attrs["instrument"] == "PCASP"
     assert root.attrs["build_complete"] is True
-    assert lut.SIG.shape == (1000, 1001, 32)
+    assert lut.SIG.shape == (1000, 1001, 200)
     setup = optical_geometry.optical_setup_from_lut_metadata(root.attrs)
     configured = optical_geometry.load_optical_setup("pcasp")
-    # Older metadata has no descriptive name/notes. Its actual optical inputs
-    # must still match; descriptive fields do not change the calculation.
-    for field in ('wavelength_nm', 'beams', 'channels', 'aerosol_direction', 'angular_step_deg'):
-        assert getattr(setup, field) == getattr(configured, field)
+    assert setup == configured
     indices = [0, 250, 500, 750, 999]
     d = lut.Dg[indices]
     ri = complex(lut.ng[560], lut.kg[9])

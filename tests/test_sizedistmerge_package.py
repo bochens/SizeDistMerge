@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +40,7 @@ assert isinstance(sdm.da_to_dv(100.0, rho_p=1000.0), float)
 assert callable(sdm.calculate_dry_diameter)
 assert callable(sdm.kappa_from_growth_factor)
 assert "miepython" not in sys.modules
-assert callable(sdm.POPSGeom)
+assert callable(sdm.load_optical_setup)
 assert "miepython" not in sys.modules
 assert callable(sdm.setup_csca)
 assert "miepython" in sys.modules
@@ -666,6 +667,8 @@ def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
         optimizer_tol=1e-5,
         optimizer_popsize=7,
         optimizer_polish=False,
+        uhsas_ri_src=RI_UHSAS_SRC,
+        pops_ri_src=RI_POPS_SRC,
     )
 
     assert captured["instrument_count"] == 3
@@ -677,7 +680,7 @@ def test_run_joint_optimization_uses_single_multi_instrument_path(monkeypatch):
     assert captured["tol"] == 1e-5
     assert captured["popsize"] == 7
     assert captured["polish"] is False
-    assert captured["ri_srcs"] == [mp.RI_UHSAS_SRC, mp.RI_POPS_SRC]
+    assert captured["ri_srcs"] == [RI_UHSAS_SRC, RI_POPS_SRC]
     assert opt_res["n_fit"] == 1.45
     assert opt_res["n_pops_fit"] == 1.55
     assert opt_res["rho_fit"] == 1200.0
@@ -745,13 +748,15 @@ def test_run_joint_optimization_handles_fims_uhsas_aps_without_pops(monkeypatch)
         temporal_w_uh=10.0,
         temporal_w_po=11.0,
         temporal_w_rho=1e-7,
+        uhsas_ri_src=RI_UHSAS_SRC,
+        pops_ri_src=RI_POPS_SRC,
     )
 
     assert captured["instrument_count"] == 2
     assert captured["pair_weights"] == [(0, 1, 1.0)]
     assert captured["temporal_target"].tolist() == [1.40, 1000.0]
     assert captured["temporal_weights"].tolist() == [10.0, 1e-7]
-    assert captured["ri_srcs"] == [mp.RI_UHSAS_SRC]
+    assert captured["ri_srcs"] == [RI_UHSAS_SRC]
     assert opt_res["n_fit"] == 1.45
     assert np.isnan(opt_res["n_pops_fit"])
     assert opt_res["rho_fit"] == 1200.0
@@ -798,13 +803,15 @@ def test_run_joint_optimization_can_override_pops_ri_source(monkeypatch):
         specs,
         {},
         {},
-        pops_ri_src=mp.RI_UHSAS_SRC,  # Explicit legacy replay, not the corrected default.
+        # Explicitly reproduce the erroneous R1 calibration for this test.
+        pops_ri_src=RI_UHSAS_SRC,
         fims_xmax=500,
+        uhsas_ri_src=RI_UHSAS_SRC,
     )
 
-    assert captured["opt_ri_src"] == mp.RI_UHSAS_SRC
-    assert captured["ri_srcs"] == [mp.RI_UHSAS_SRC]
-    assert opt_res["pops_ri_src"] == mp.RI_UHSAS_SRC
+    assert captured["opt_ri_src"] == RI_UHSAS_SRC
+    assert captured["ri_srcs"] == [RI_UHSAS_SRC]
+    assert opt_res["pops_ri_src"] == RI_UHSAS_SRC
 
 
 def test_arcsix_instrument_selection_is_configurable():
@@ -961,6 +968,8 @@ def test_arcsix_period_runner_carries_temporal_params(monkeypatch, tmp_path):
         aps_combine_weight=2.0,
         output_edges=edges,
         checkpoint_netcdf=False,
+        uhsas_ri_src=RI_UHSAS_SRC,
+        pops_ri_src=RI_POPS_SRC,
     )
 
     assert len(captured_prev) == 2
@@ -1001,6 +1010,8 @@ def test_temporal_regularization_requires_explicit_prior(monkeypatch):
             {},
             uhsas_xmin=None,
             temporal_w_uh=1.0,
+            uhsas_ri_src=RI_UHSAS_SRC,
+            pops_ri_src=RI_POPS_SRC,
         )
     except ValueError as exc:
         assert "requires explicit" in str(exc)
@@ -1068,6 +1079,8 @@ def test_arcsix_period_runner_raises_after_chunk_errors(monkeypatch, tmp_path):
             tmp_path / "out",
             fims_lag=0,
             min_samples_per_inst=1,
+            uhsas_ri_src=RI_UHSAS_SRC,
+            pops_ri_src=RI_POPS_SRC,
         )
     except RuntimeError as exc:
         assert "1 ARCSIX merge chunk" in str(exc)
@@ -1160,6 +1173,8 @@ def test_fims_aps_only_writes_selected_fims_spectrum(monkeypatch, tmp_path):
         fims_lag=0,
         min_samples_per_inst=1,
         fims_xmax=40.0,
+        uhsas_ri_src=RI_UHSAS_SRC,
+        pops_ri_src=RI_POPS_SRC,
     )
 
     assert captured["e_fims_sel"].tolist() == [10.0, 20.0, 40.0]
@@ -1447,3 +1462,15 @@ def test_find_merged_netcdf_files_excludes_product_and_failed_backup_dirs(tmp_pa
 
     found = mp.find_merged_netcdf_files(tmp_path / "merge")
     assert found == [keep]
+
+
+# Calibration values for these synthetic campaign fixtures only.
+RI_UHSAS_SRC = complex(1.52, 0.)
+RI_POPS_SRC = complex(1.615, .001)
+
+
+@pytest.mark.parametrize('instrument', ['POPS', 'UHSAS'])
+def test_optical_alignment_requires_notebook_calibration(instrument):
+    from campaign_merge_production import arcsix_merge_production as production
+    with pytest.raises(ValueError, match=f'Set {instrument.lower()}_ri_src'):
+        production.run_joint_optimization({'FIMS': None, instrument: None}, {}, {})

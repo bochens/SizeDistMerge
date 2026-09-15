@@ -64,7 +64,93 @@
     "eff_big_disk_d_mm": 24.637839421033327,
     "eff_small_disk_d_mm": 4.227382348364713,
     "geometry_reference": "Howell et al. 2021 Fig. 1 and Appendix A",
-    "irradiance_basis": "total incident irradiance; symmetric counterpropagating beams"
+    "irradiance_basis": "total incident irradiance; symmetric counterpropagating beams",
+    "optical_setup": {
+      "wavelength_nm": 1054.0,
+      "beams": [
+        {
+          "direction": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "polarization": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "irradiance_fraction": 0.5
+        },
+        {
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "polarization": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "irradiance_fraction": 0.5
+        }
+      ],
+      "channels": [
+        {
+          "name": "Collection 1",
+          "collect": [
+            {
+              "axis": [
+                0.0,
+                1.0,
+                0.0
+              ],
+              "half_angle_deg": 57.0
+            }
+          ],
+          "exclude": [
+            {
+              "axis": [
+                0.0,
+                1.0,
+                0.0
+              ],
+              "half_angle_deg": 14.8
+            }
+          ]
+        },
+        {
+          "name": "Collection 2",
+          "collect": [
+            {
+              "axis": [
+                0.0,
+                -1.0,
+                0.0
+              ],
+              "half_angle_deg": 57.0
+            }
+          ],
+          "exclude": [
+            {
+              "axis": [
+                0.0,
+                -1.0,
+                0.0
+              ],
+              "half_angle_deg": 14.8
+            }
+          ]
+        }
+      ],
+      "aerosol_direction": [
+        -1.0,
+        0.0,
+        0.0
+      ],
+      "angular_step_deg": 0.25
+    },
+    "setup_metadata_migration": "2026-09-15: reconstructed from original versioned geometry attributes; verified against TOML. Scattering arrays unchanged; a separate 200-k rebuild is required."
   },
   "zarr_format": 3,
   "consolidated_metadata": null,

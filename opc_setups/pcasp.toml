@@ -1,4 +1,5 @@
 schema_version = 1
+response_channel = "Collection"
 name = "PCASP"
 reference = "Rosenberg et al. (2012), Table 1; doi:10.5194/amt-5-1147-2012"
 notes = "Nominal full-azimuth angular band, not a measured aperture transmission map. No gain or losses."

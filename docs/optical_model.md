@@ -124,7 +124,7 @@ refactor, so this change alone does not require rebuilding LUTs.
 
 ## Experimental LAS 3340-family option
 
-`las_uhsas_proxy_setup(polarization=...)` provides a **test hypothesis**, not
+The `las_uhsas_proxy_*.toml` settings provide a **test hypothesis**, not
 a verified LAS aperture. It uses the UHSAS circular annular openings at the
 LAS wavelength of 633 nm. The required polarization choice is `unpolarized`,
 `perpendicular`, or `parallel` (relative to the central beam/collector plane).

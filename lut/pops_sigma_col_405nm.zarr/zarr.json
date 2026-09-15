@@ -63,7 +63,48 @@
     "mirror_halfangle_deg": 52.0,
     "pmt_aperture_distance_mm": null,
     "direct_collection": false,
-    "geometry_reference": "Gao et al. 2016 Fig. 1; mirror-only default per Liu et al. 2021 Appendix A"
+    "geometry_reference": "Gao et al. 2016 Fig. 1; mirror-only default per Liu et al. 2021 Appendix A",
+    "optical_setup": {
+      "wavelength_nm": 405.0,
+      "beams": [
+        {
+          "direction": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "polarization": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "irradiance_fraction": 1.0
+        }
+      ],
+      "channels": [
+        {
+          "name": "Collection",
+          "collect": [
+            {
+              "axis": [
+                0.0,
+                1.0,
+                0.0
+              ],
+              "half_angle_deg": 52.0
+            }
+          ],
+          "exclude": []
+        }
+      ],
+      "aerosol_direction": [
+        -1.0,
+        0.0,
+        0.0
+      ],
+      "angular_step_deg": 0.25
+    },
+    "setup_metadata_migration": "2026-09-15: reconstructed from original versioned geometry attributes; verified against TOML. Scattering arrays unchanged; a separate 200-k rebuild is required."
   },
   "zarr_format": 3,
   "consolidated_metadata": null,

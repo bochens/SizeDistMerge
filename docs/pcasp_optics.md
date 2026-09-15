@@ -27,7 +27,7 @@ the source index remains an explicit input when converting campaign data.
 
 ## Calculation and units
 
-`setup_csca` with the PCASP setup, and `build_pcasp_sigma_lut`, use the shared polarized
+`setup_csca` with the PCASP setup, and `build_setup_sigma_lut`, use the shared polarized
 Mie calculation for homogeneous spheres in air. They integrate the scattered
 power per unit solid angle over the collector. Units are square micrometers.
 Full-azimuth collection makes the integral independent of the chosen
@@ -37,7 +37,7 @@ The default beams have equal irradiance and are added incoherently (their
 intensities, not their electric fields, are added). The paper describes a
 crystal oscillator that prevents interference and reflects 99.9% of the
 outgoing light, then uses equal weights in Table 1. The default follows that
-table. `PCASPGeom(reflected_beam_ratio=.999)` permits the stated ratio instead.
+table. A custom TOML can specify beam fractions of 1/1.999 and .999/1.999 for that alternative.
 
 Our cross-section is `collected power / total incident irradiance`, consistent
 with the shared optical interface. Thus the equivalent angular weights are
@@ -110,9 +110,10 @@ grid points. The example does not replace existing tables or launch a campaign.
 For a direct calculation without a table:
 
 ```python
-from sizedistmerge.optical_diameter import pcasp_optical_setup, setup_csca
+from sizedistmerge.optical_geometry import load_optical_setup
+from sizedistmerge.optical_diameter import setup_csca
 
-setup = pcasp_optical_setup()
+setup = load_optical_setup("pcasp")
 sigma_um2 = setup_csca([100., 500., 1000., 3000.], 1.58+0j, setup)["Collection"]
 ```
 

@@ -38,7 +38,6 @@ from sizedistmerge.utils import (
 from sizedistmerge.alignment import optimize_multi_custom
 from sizedistmerge.optical_lut import SigmaLUT
 from sizedistmerge.optical_diameter import convert_do_lut, make_monotone_sigma_interpolator
-from sizedistmerge.optical_geometry import RI_UHSAS_SRC, RI_POPS_SRC
 from sizedistmerge.diameter_conversion import da_to_dv
 from sizedistmerge.combine import (make_grid_from_series, merge_sizedists_tikhonov,
                                   merge_sizedists_tikhonov_consensus, smooth_weight_profile,
@@ -2375,7 +2374,7 @@ def run_joint_uhsas_aps_opt_from_specs(
     pair_w: float = 1.0, uhsas_bounds=((1.3, 1.8),),
     aps_bounds=((950.0, 2000.0),), uhsas_xmin=200,
     uhsas_xmax=None, fims_xmin=None,
-    fims_xmax=500, lut_dir=None,
+    fims_xmax=500, lut_dir=None, uhsas_ri_src=None,
 ):
     return run_joint_optimization(
         specs,
@@ -2391,6 +2390,7 @@ def run_joint_uhsas_aps_opt_from_specs(
         fims_xmin=fims_xmin,
         fims_xmax=fims_xmax,
         lut_dir=lut_dir,
+        uhsas_ri_src=uhsas_ri_src,
     )
 
 
@@ -2405,6 +2405,7 @@ def run_joint_optimization(
     fims_xmax=400, pops_xmin=None, pops_xmax=None,
     lut_dir=None,
     pops_ri_src=None,
+    uhsas_ri_src=None,
     w_uhsas: float = 1.0,
     w_pops: float = 1.0,
     w_aps: float = 1.0,
@@ -2452,10 +2453,11 @@ def run_joint_optimization(
 
     if pops_bounds is None:
         pops_bounds = uhsas_bounds
-    if pops_ri_src is None:
-        # ARCSIX POPS R1 diameters are PSL-equivalent, not ammonium-sulfate-equivalent.
-        # Pass RI_UHSAS_SRC explicitly only to reproduce the erroneous merged R1 product.
-        pops_ri_src = RI_POPS_SRC
+    # Calibration belongs to the supplied data, not to a universal OPC model.
+    # Require the notebook to state it instead of silently choosing a material.
+    for instrument, calibration in (("POPS", pops_ri_src), ("UHSAS", uhsas_ri_src)):
+        if instrument in specs and calibration is None:
+            raise ValueError(f"Set {instrument.lower()}_ri_src in the production notebook")
 
     m_FIMS, e_FIMS, y_FIMS, s_FIMS = specs["FIMS"]
     m_fims_sel, e_fims_sel, y_fims_sel, s_fims_sel = select_between(
@@ -2477,7 +2479,7 @@ def run_joint_optimization(
             m_UHSAS, e_UHSAS, y_UHSAS, s_UHSAS, xmin=uhsas_xmin, xmax=uhsas_xmax
         )
         lut_uhsas = _load_uhsas_lut(lut_dir)
-        source_sigma_fn = _make_source_sigma_fn(lut_uhsas, RI_UHSAS_SRC, response_bins=response_bins_fit)
+        source_sigma_fn = _make_source_sigma_fn(lut_uhsas, uhsas_ri_src, response_bins=response_bins_fit)
         selected["UHSAS"] = (e_sel, y_sel, s_sel, lut_uhsas)
         instruments.append(
             {
@@ -2487,7 +2489,7 @@ def run_joint_optimization(
                 "remap_fn": _uhsas_remap_fn,
                 "kwargs": {
                     "lut": lut_uhsas,
-                    "ri_src": RI_UHSAS_SRC,
+                    "ri_src": uhsas_ri_src,
                     "response_bins": response_bins_fit,
                     "source_sigma_fn": source_sigma_fn,
                 },
@@ -2582,6 +2584,7 @@ def run_joint_optimization(
         "temporal_target": temporal_target,
         "temporal_weights": temporal_weights,
         "pops_ri_src": pops_ri_src,
+        "uhsas_ri_src": uhsas_ri_src,
         "response_bins_fit": response_bins_fit,
         "response_bins_apply": response_bins_apply,
         "hist": hist,
@@ -2606,7 +2609,7 @@ def run_joint_optimization(
 
         if name == "UHSAS":
             fit_edges = _uhsas_remap_fn(
-                edges, [value], lut=lut, ri_src=RI_UHSAS_SRC, response_bins=response_bins_apply
+                edges, [value], lut=lut, ri_src=uhsas_ri_src, response_bins=response_bins_apply
             )
             label = f"UHSAS fit (n={value:.3f})"
             opt_res["n_fit"] = value
@@ -3399,6 +3402,7 @@ def run_arcsix_merge_for_periods(
     pops_xmax=None,
     lut_dir=None,
     pops_ri_src=None,
+    uhsas_ri_src=None,
     fine_bin=200,
     include_pops=True,
     instruments=None,
@@ -3453,9 +3457,10 @@ def run_arcsix_merge_for_periods(
     merge_instruments = _normalize_merge_instruments(instruments, include_pops=include_pops)
     apply_alignment = _validate_apply_alignment(apply_alignment, merge_instruments)
     include_pops = "POPS" in merge_instruments
-    if include_pops and pops_ri_src is None:
-        # POPS and UHSAS have different calibration materials and source indices.
-        pops_ri_src = RI_POPS_SRC
+    if apply_alignment:
+        for instrument, calibration in (("POPS", pops_ri_src), ("UHSAS", uhsas_ri_src)):
+            if instrument in merge_instruments and calibration is None:
+                raise ValueError(f"Set {instrument.lower()}_ri_src in the production notebook")
 
     if not apply_alignment:
         if _temporal_regularization_enabled(
@@ -3913,6 +3918,7 @@ def run_arcsix_merge_for_periods(
                     pops_xmax=pops_xmax,
                     lut_dir=lut_dir,
                     pops_ri_src=pops_ri_src,
+                    uhsas_ri_src=uhsas_ri_src,
                     w_uhsas=w_uhsas,
                     w_pops=w_pops,
                     w_aps=w_aps,

@@ -7,24 +7,17 @@ import numpy as np
 import zarr
 from joblib import Parallel, delayed
 from scipy.interpolate import RegularGridInterpolator
-from .optical_geometry import (
-    OpticalSetup,
-    POPSGeom, UHSASGeom, PCASPGeom,
-    pops_optical_setup, uhsas_optical_setup, pcasp_optical_setup,
-    POPS_WAVELENGTH_NM, UHSAS_WAVELENGTH_NM, PCASP_WAVELENGTH_NM,
-    OPTICAL_MODEL_VERSION,
-)
+from dataclasses import replace
+from .optical_geometry import OpticalSetup, OPTICAL_MODEL_VERSION, optical_setup_from_lut_metadata
 
 DEFAULT_D_RANGE  = (60.0, 5000.0, 360)    # (min, max, num points)
 DEFAULT_N_RANGE  = (1.30, 1.80, 0.001)    # (min, max, step)
 DEFAULT_K_VALUES = (0.0, 0.001, 0.01, 0.1)
 DEFAULT_CHUNKS   = (128, 64, 1)           # (D, n, k) for Zarr v3
 
-def build_sigma_lut(
+def build_setup_sigma_lut(
     zpath: str,
-    kernel: str,
-    wavelength_nm: float,
-    geom,
+    setup: OpticalSetup,
     *,
     D_range = DEFAULT_D_RANGE,
     n_range = DEFAULT_N_RANGE,
@@ -32,7 +25,7 @@ def build_sigma_lut(
     chunks = DEFAULT_CHUNKS,
     jobs_per_k: int = -1,
     parallel_backend: str = "threads",
-    response_channel: str | None = None,
+    channel: str | None = None,
 ):
     """Build a new lookup table of unsmoothed scattering cross-sections.
 
@@ -44,13 +37,10 @@ def build_sigma_lut(
     # Import at call time so the storage and calculation modules stay independent.
     from .optical_diameter import setup_geometry_cache, setup_csca
 
-    kern = kernel.lower()
-    if kern not in ("pops", "uhsas", "custom"):
-        raise ValueError("kernel must be 'pops', 'uhsas' or 'custom'.")
-    if not np.isfinite(wavelength_nm) or wavelength_nm <= 0:
-        raise ValueError("wavelength_nm must be finite and positive")
-    if kern != "custom" and response_channel is not None:
-        raise ValueError("use build_setup_sigma_lut to select a response channel")
+    if not isinstance(setup, OpticalSetup):
+        raise TypeError("setup must be an OpticalSetup loaded from TOML or explicitly constructed")
+    wavelength_nm = setup.wavelength_nm
+    channel = channel if channel is not None else setup.response_channel
 
     D_min, D_max, D_pts   = D_range
     n_min, n_max, n_step  = n_range
@@ -74,23 +64,11 @@ def build_sigma_lut(
         raise ValueError("LUT interpolation requires at least two increasing n and k coordinates")
 
     # Validate geometry before touching disk, and never overwrite an existing LUT.
-    if kern == "pops":
-        setup = pops_optical_setup(geom, wavelength_nm=wavelength_nm)
-        response_channels = [c.name for c in setup.channels]
-    elif kern == "uhsas":
-        setup = uhsas_optical_setup(geom, wavelength_nm=wavelength_nm)
-        response_channels = [setup.channels[0].name]
-    else:
-        if not isinstance(geom, OpticalSetup) or geom.wavelength_nm != wavelength_nm:
-            raise ValueError("custom geometry must be an OpticalSetup with matching wavelength")
-        setup = geom
-        selected = [c for c in setup.channels if c.name == response_channel]
-        if len(selected) != 1:
-            raise ValueError("select exactly one named response_channel for the LUT")
-        response_channels = [response_channel]
-    selected = tuple(c for c in setup.channels if c.name in response_channels)
-    calculation_setup = OpticalSetup(setup.wavelength_nm, setup.beams, selected,
-                                     setup.aerosol_direction, setup.angular_step_deg)
+    selected = tuple(detector for detector in setup.channels if detector.name == channel)
+    if len(selected) != 1:
+        raise ValueError("select exactly one named response channel for the LUT")
+    response_channels = [channel]
+    calculation_setup = replace(setup, channels=selected, response_channel=channel)
     cache = setup_geometry_cache(calculation_setup)
     if os.path.lexists(zpath):
         raise FileExistsError(f"LUT destination already exists: {zpath}; choose a new directory")
@@ -110,8 +88,8 @@ def build_sigma_lut(
     )
 
     # All instruments use the same integrator and precomputed setup cache.
-    # UHSAS/custom select one detector; POPS retains its optional path sum.
-    kernel_name = kern.upper()
+    # The selected detector is explicit; different detectors are never silently summed.
+    kernel_name = setup.name or "CUSTOM"
 
     def _curve_for_n(n_val, k_val):
         m = complex(float(n_val), float(k_val))
@@ -152,103 +130,18 @@ def build_sigma_lut(
         "n_range": [float(n_min), float(n_max), float(n_step)],
         "k_values": kg.tolist(),
         "wavelength_nm": float(wavelength_nm),
-        "polarization": "linear E perpendicular to laser and central collection axis; azimuth resolved",
-        "kernel": kernel_name,
+        "polarization": "incoherent polarized beams specified in optical_setup",
+        "kernel": "CUSTOM",
+        "instrument": setup.name,
+        "geometry_reference": setup.reference,
+        "geometry_notes": setup.notes,
         "optical_setup": setup.to_dict(),
         "response_channels": response_channels,
         "irradiance_basis": "total incident irradiance; incoherent beam intensity fractions sum to one",
     }
-    if kern == "pops":
-        attrs.update({
-            "ring_theta_min_deg": float(geom.ring_theta_min_deg),
-            "ring_theta_max_deg": float(geom.ring_theta_max_deg),
-            "ring_step_deg": float(geom.ring_step_deg),
-            "mirror_diameter_mm": float(geom.mirror_diameter_mm),
-            "distance_to_mirror_mm": float(geom.distance_to_mirror_mm),
-            "pmt_aperture_d_mm": float(geom.pmt_aperture_d_mm),
-            "pmt_center_deg": float(geom.pmt_center_deg),
-            "mirror_halfangle_deg": float(geom.mirror_halfangle_deg),
-            "pmt_aperture_distance_mm": geom.pmt_aperture_distance_mm,
-            "direct_collection": len(response_channels) > 1,
-            "geometry_reference": "Gao et al. 2016 Fig. 1; mirror-only default per Liu et al. 2021 Appendix A",
-        })
-    elif kern == "uhsas":
-        L = float(geom.aperture_distance_mm)
-        eff_big_d_mm   = 2.0 * L * np.tan(np.deg2rad(geom.big_outer_halfangle_deg))
-        eff_small_d_mm = 2.0 * L * np.tan(np.deg2rad(geom.inner_stop_halfangle_deg))
-        attrs.update({
-            "big_theta_min_deg": float(geom.big_theta_min_deg),
-            "big_theta_max_deg": float(geom.big_theta_max_deg),
-            "small_theta_min_deg": float(geom.small_theta_min_deg),
-            "small_theta_max_deg": float(geom.small_theta_max_deg),
-            "ring_step_deg": float(geom.ring_step_deg),
-            "aperture_distance_mm": L,
-            "big_outer_halfangle_deg": float(geom.big_outer_halfangle_deg),
-            "inner_stop_halfangle_deg": float(geom.inner_stop_halfangle_deg),
-            "eff_big_disk_d_mm": float(eff_big_d_mm),
-            "eff_small_disk_d_mm": float(eff_small_d_mm),
-            "geometry_reference": "Howell et al. 2021 Fig. 1 and Appendix A",
-            "irradiance_basis": "total incident irradiance; symmetric counterpropagating beams",
-        })
-    else:
-        attrs["polarization"] = "linear polarization vectors specified in optical_setup"
     root.attrs.update(attrs)
 
     return dict(zpath=zpath, D_grid_nm=Dg, n_grid=ng, k_grid=kg)
-
-
-def build_setup_sigma_lut(zpath, setup: OpticalSetup, *, channel, **kwargs):
-    """Build a LUT for one explicitly selected detector in the shared setup."""
-    return build_sigma_lut(zpath, "custom", setup.wavelength_nm, setup,
-                           response_channel=channel, **kwargs)
-
-
-def build_pcasp_sigma_lut(zpath, geom: PCASPGeom | None = None, *,
-                         wavelength_nm=PCASP_WAVELENGTH_NM, **kwargs):
-    """Build a new PCASP LUT through the shared geometry integrator.
-
-    This does not assume a campaign calibration refractive index. The saved
-    kernel is CUSTOM because it uses the same general integrator as a custom
-    setup; the instrument and literature provenance are recorded separately.
-    Existing destinations are rejected by the common builder.
-    """
-    geom = geom or PCASPGeom()
-    setup = pcasp_optical_setup(geom, wavelength_nm=wavelength_nm)
-    result = build_setup_sigma_lut(zpath, setup, channel="Collection", **kwargs)
-    root = zarr.open_group(zpath, mode="a")
-    root.attrs.update({
-        "instrument": "PCASP",
-        "description": "PCASP nominal collected scattering cross-section",
-        "geometry_reference": "Rosenberg et al. 2012 Table 1; doi:10.5194/amt-5-1147-2012",
-        "geometry_scope": "nominal full-azimuth acceptance; no measured aperture transmission or detector gain",
-        "outgoing_beam_collection_deg": [geom.theta_min_deg, geom.theta_max_deg],
-        "returning_beam_collection_deg": [180-geom.theta_max_deg, 180-geom.theta_min_deg],
-        "reflected_beam_ratio": geom.reflected_beam_ratio,
-        "outgoing_irradiance_basis_multiplier": 1+geom.reflected_beam_ratio,
-    })
-    return result
-
-
-def build_pops_sigma_lut(
-    zpath: str, geom: POPSGeom, *,
-    D_range=DEFAULT_D_RANGE, n_range=DEFAULT_N_RANGE, k_values=DEFAULT_K_VALUES,
-    chunks=DEFAULT_CHUNKS, jobs_per_k=-1, parallel_backend="threads",
-    wavelength_nm: float = POPS_WAVELENGTH_NM
-):
-    return build_sigma_lut(zpath, "pops", wavelength_nm, geom,
-                           D_range=D_range, n_range=n_range, k_values=k_values,
-                           chunks=chunks, jobs_per_k=jobs_per_k, parallel_backend=parallel_backend)
-
-
-def build_uhsas_sigma_lut(
-    zpath: str, geom: UHSASGeom, *,
-    D_range=DEFAULT_D_RANGE, n_range=DEFAULT_N_RANGE, k_values=DEFAULT_K_VALUES,
-    chunks=DEFAULT_CHUNKS, jobs_per_k=-1, parallel_backend="threads",
-    wavelength_nm: float = UHSAS_WAVELENGTH_NM
-):
-    return build_sigma_lut(zpath, "uhsas", wavelength_nm, geom,
-                           D_range=D_range, n_range=n_range, k_values=k_values,
-                           chunks=chunks, jobs_per_k=jobs_per_k, parallel_backend=parallel_backend)
 
 
 def _check_lut_model(root, *, allow_legacy=False):
@@ -310,6 +203,20 @@ class SigmaLUT:
         z = zarr.open(zpath, mode="r")
         _check_lut_model(z, allow_legacy=allow_legacy)
         self.zpath = zpath
+        # Keep the table's own build-time description. Loading a new TOML here
+        # would incorrectly relabel an older table when an instrument setup changes.
+        self.metadata = dict(z.attrs)
+        if 'optical_setup' in self.metadata or self.metadata.get('optical_model_version') == OPTICAL_MODEL_VERSION:
+            self.optical_setup = optical_setup_from_lut_metadata(self.metadata)
+        else:
+            # Explicit legacy comparison only: missing geometry stays unknown.
+            self.optical_setup = None
+        self.response_channels = tuple(self.metadata.get('response_channels', ()))
+        if self.optical_setup is not None:
+            available = {channel.name for channel in self.optical_setup.channels}
+            if not set(self.response_channels) <= available:
+                raise ValueError('LUT response_channels disagree with its saved optical_setup')
+        self.instrument = str(self.metadata.get('instrument', ''))
         self.Dg  = z["coords/D_nm"][:].astype(float)
         self.ng  = z["coords/n"][:].astype(float)
         self.kg  = z["coords/k"][:].astype(float)

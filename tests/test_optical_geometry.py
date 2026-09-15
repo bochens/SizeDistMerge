@@ -51,7 +51,7 @@ def test_isotropic_solid_angle_matches_exact_cone(outer, inner):
 def test_uhsas_central_opening_is_114_degrees_not_180():
     width, _, _ = od._cone_azimuth_weights(np.array([np.pi/2]), 57.)
     assert np.rad2deg(width[0]) == pytest.approx(114.)
-    c = od.setup_geometry_cache(optical_geometry.uhsas_optical_setup(optical_geometry.UHSASGeom()))["Collection 1"][0]
+    c = od.setup_geometry_cache(optical_geometry.load_optical_setup("uhsas"))["Collection 1"][0]
     center = np.argmin(abs(c.theta_rad - np.pi/2))
     assert np.rad2deg(c.dphi[center]) == pytest.approx(114. - 29.6)
 
@@ -84,21 +84,18 @@ def test_rayleigh_polarized_collection_fraction(outer, inner):
     assert actual / total == pytest.approx(fraction, rel=2e-4)
 
 
-def test_pops_direct_path_is_explicit_and_uses_its_own_distance():
-    geom = optical_geometry.POPSGeom()
-    assert len(optical_geometry.pops_optical_setup(geom).channels) == 1
-    with pytest.raises(ValueError, match="pmt_aperture_distance_mm"):
-        optical_geometry.pops_optical_setup(replace(geom, pmt_aperture_d_mm=5.))
-    # Synthetic geometry only: 20 mm is NOT a claimed POPS dimension.
-    configured = replace(geom, pmt_aperture_d_mm=5., pmt_aperture_distance_mm=20.)
-    c = od.setup_geometry_cache(optical_geometry.pops_optical_setup(configured))
-    alpha = np.rad2deg(np.arctan(2.5/20.))
-    expected = detector_coordinate_integral(200., 1.615+0.001j, 405., alpha)
-    with_direct = od.setup_csca([200.], 1.615+0.001j, optical_geometry.pops_optical_setup(configured))
-    mirror_only = od.setup_csca([200.], 1.615+0.001j, optical_geometry.pops_optical_setup(geom))
-    diff = (sum(with_direct.values()) - sum(mirror_only.values()))[0]
-    assert diff == pytest.approx(expected, rel=2e-3)
-    assert len(c) == 2
+def test_explicit_extra_detector_matches_independent_integral():
+    setup = optical_geometry.load_optical_setup('pops')
+    assert len(setup.channels) == 1
+    # Synthetic opening: neither dimension is claimed to describe POPS.
+    angle = np.rad2deg(np.arctan(2.5/20.))
+    direct = optical_geometry.CollectionChannel('Synthetic direct', (
+        optical_geometry.CollectionCone((0,1,0),angle),))
+    configured = replace(setup,channels=setup.channels+(direct,))
+    result = od.setup_csca([200.],1.615+.001j,configured)
+    expected = detector_coordinate_integral(200.,1.615+.001j,405.,angle)
+    assert result['Synthetic direct'][0] == pytest.approx(expected,rel=2e-3)
+    np.testing.assert_array_equal(result['Collection'],od.setup_csca([200.],1.615+.001j,setup)['Collection'])
 
 
 @pytest.mark.parametrize("kind", ["pops", "uhsas"])
@@ -124,8 +121,8 @@ def test_numpy_and_numba_paths_agree(monkeypatch):
 
 
 def test_wavelength_size_scaling():
-    a = np.sum(list(od.setup_csca([200.], 1.52+0j, optical_geometry.pops_optical_setup(optical_geometry.POPSGeom(), wavelength_nm=405.)).values()), axis=0)
-    b = np.sum(list(od.setup_csca([400.], 1.52+0j, optical_geometry.pops_optical_setup(optical_geometry.POPSGeom(), wavelength_nm=810.)).values()), axis=0)
+    a = np.sum(list(od.setup_csca([200.], 1.52+0j, replace(optical_geometry.load_optical_setup("pops"), wavelength_nm=405.)).values()), axis=0)
+    b = np.sum(list(od.setup_csca([400.], 1.52+0j, replace(optical_geometry.load_optical_setup("pops"), wavelength_nm=810.)).values()), axis=0)
     assert b[0] == pytest.approx(4*a[0])
 
 
@@ -211,18 +208,17 @@ def test_same_ri_conversion_is_identity_even_for_oscillatory_curve():
 @pytest.mark.parametrize("kind", ["pops", "uhsas"])
 def test_small_lut_is_versioned_matches_kernel_and_cannot_be_overwritten(tmp_path, kind):
     path = tmp_path / f"{kind}.zarr"
-    geom, wl = (optical_geometry.POPSGeom(), 405.) if kind == "pops" else (optical_geometry.UHSASGeom(), 1054.)
     setup = optical_geometry.load_optical_setup(kind)
     channel = 'Collection' if kind == 'pops' else 'Collection 1'
     args = dict(D_range=(100., 1000., 6), n_range=(1.5, 1.6, .1),
                 k_values=(0., .001), chunks=(6, 2, 1), jobs_per_k=1)
-    optical_lut.build_sigma_lut(str(path), kind, wl, geom, **args)
+    optical_lut.build_setup_sigma_lut(str(path), setup, **args)
     lut = optical_lut.SigmaLUT(str(path))
     assert np.allclose(lut.sigma_curve(lut.Dg, 1.5, 0.),
                        od.setup_csca(lut.Dg, 1.5+0j, setup)[channel], rtol=1e-6, atol=0)
     assert optical_lut.sigma_query_zarr(str(path), 100., 1.5, 0.) == pytest.approx(lut.SIG[0, 0, 0])
     with pytest.raises(FileExistsError):
-        optical_lut.build_sigma_lut(str(path), kind, wl, geom, **args)
+        optical_lut.build_setup_sigma_lut(str(path), setup, **args)
     root = zarr.open(str(path), mode="r+")
     assert root.attrs["optical_model_version"] == optical_geometry.OPTICAL_MODEL_VERSION
     assert root.attrs["build_complete"] is True

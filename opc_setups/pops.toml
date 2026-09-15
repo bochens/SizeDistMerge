@@ -1,6 +1,7 @@
 # Directions use [x, y, z]. Laser: z; electric field: x; collector: y.
 # theta is measured from the beam. phi runs from y toward x for this beam.
 schema_version = 1
+response_channel = "Collection"
 name = "POPS"
 reference = "Gao et al. (2016), Fig. 1; mirror-only model per Liu et al. (2021), Appendix A"
 notes = "Angular acceptance, not a physical mirror surface. No direct detector path or optical losses."

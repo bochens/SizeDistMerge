@@ -1,4 +1,5 @@
 schema_version = 1
+response_channel = "Collection 1"
 name = "UHSAS"
 reference = "Howell et al. (2021), Fig. 1 and Appendix A"
 notes = "Opposing detectors remain separate. Each cross-section is normalized to total incident irradiance."

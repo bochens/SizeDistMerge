@@ -107,11 +107,20 @@ wrappers have been removed. For every instrument, use `setup_csca(setup=...)`
 and `setup_geometry_cache(setup)`; choose the required named detector from
 the returned dictionary. Parallel LUT building remains in `optical_lut`.
 
-The no-argument preset factories load TOML. Passing an
-explicit `POPSGeom`, `UHSASGeom`, or `PCASPGeom` instead retains the legacy
-Python settings path; it intentionally does not read a TOML override.
+Instrument optical settings live only in `opc_setups/*.toml`. The loader keeps
+the name, reference, notes, and selected response channel with the physical
+setup. There are no instrument-specific Python classes or LUT builders.
 
-This reorganization does not change the Mie equations, angular integration,
-response smoothing, inverse calculation, or existing LUT contents. The default
-TOML setups reproduce the legacy presets. No production restart or LUT rebuild
-is needed solely because the code was reorganized.
+Calibration refractive indices are explicit production-notebook settings,
+passed through `uhsas_ri_src` and `pops_ri_src`. They have no numerical defaults
+in the library and are not part of the geometry TOML.
+
+LUTs retain their build-time setup. Loading an older LUT must not substitute
+today's TOML. The integration, response smoothing, and diameter conversion
+are unchanged by this refactor; denser LUT grids are a separate experiment.
+
+`SigmaLUT.metadata` exposes the stored attributes, `SigmaLUT.optical_setup`
+contains the checked build-time geometry, and `SigmaLUT.response_channels`
+records which detector response the table contains. A corrected table missing
+its full setup is rejected. Explicit legacy comparisons can have unknown
+geometry; the reader does not invent it from an instrument name.

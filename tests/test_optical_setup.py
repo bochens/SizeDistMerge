@@ -89,7 +89,7 @@ def test_rotating_all_inputs_together_preserves_result():
 
 
 def test_uhsas_channels_and_total_irradiance_no_factor_two():
-    setup = optical_geometry.uhsas_optical_setup()
+    setup = optical_geometry.load_optical_setup("uhsas")
     result = od.setup_csca([100., 500., 1000.], 1.52, setup)
     # A single beam at total irradiance must give the same result as the two
     # symmetric counter-propagating half-irradiance beams, not half the result.
@@ -100,29 +100,29 @@ def test_uhsas_channels_and_total_irradiance_no_factor_two():
         assert np.array_equal(value, original)
 
 
+def _setup_with_optional_direct(kind):
+    setup = optical_geometry.load_optical_setup('pops' if kind == 'pops_direct' else kind)
+    if kind == 'pops_direct':
+        # Synthetic extra detector, not an assumed physical POPS component.
+        direct = optical_geometry.CollectionChannel('Synthetic direct', (
+            optical_geometry.CollectionCone((0, 1, 0), np.rad2deg(np.arctan(2.5/20))),))
+        setup = replace(setup, channels=setup.channels+(direct,))
+    return setup
+
+
 @pytest.mark.parametrize('kind', ['pops', 'pops_direct', 'uhsas'])
 def test_general_integrator_cached_and_uncached_outputs_agree(kind):
-    d, ri = [60., 300., 1000.], 1.615+.001j
-    if kind == 'uhsas':
-        geom, wavelength = optical_geometry.UHSASGeom(), 1054.
-        setup_fn = optical_geometry.uhsas_optical_setup
-    else:
-        geom, wavelength = optical_geometry.POPSGeom(), 405.
-        if kind == 'pops_direct':
-            # Synthetic optional aperture, not a measured POPS detector position.
-            geom = replace(geom, pmt_aperture_d_mm=5., pmt_aperture_distance_mm=20.)
-        setup_fn = optical_geometry.pops_optical_setup
-    setup = setup_fn(geom, wavelength_nm=wavelength)
-    expected = od.setup_csca(d, ri, setup)
-    actual = od.setup_csca(d, ri, setup, _cache=od.setup_geometry_cache(setup))
-    assert list(actual) == list(expected)
+    setup = _setup_with_optional_direct(kind)
+    expected = od.setup_csca([60., 300., 1000.], 1.615+.001j, setup)
+    actual = od.setup_csca([60., 300., 1000.], 1.615+.001j, setup,
+                           _cache=od.setup_geometry_cache(setup))
     for channel in expected:
-        assert np.array_equal(actual[channel], expected[channel])
+        np.testing.assert_array_equal(actual[channel], expected[channel])
 
 
 @pytest.mark.parametrize('kind,expected_paths', [('uhsas', 1), ('pcasp', 2)])
 def test_general_integrator_reuses_only_identical_scattering_geometries(monkeypatch, kind, expected_paths):
-    setup = optical_geometry.uhsas_optical_setup() if kind == 'uhsas' else optical_geometry.pcasp_optical_setup()
+    setup = optical_geometry.load_optical_setup("uhsas") if kind == 'uhsas' else optical_geometry.load_optical_setup("pcasp")
     diameters, ri = [100., 500., 1000.], 1.6+.01j
     expected = od.setup_csca(diameters, ri, setup)
     original = od._collected_cross_section
@@ -142,40 +142,25 @@ def test_general_integrator_reuses_only_identical_scattering_geometries(monkeypa
 
 @pytest.mark.parametrize('kind', ['pops', 'pops_direct', 'uhsas'])
 def test_preset_luts_use_general_integrator_and_keep_output_conventions(tmp_path, monkeypatch, kind):
-    geom, wavelength = (optical_geometry.UHSASGeom(), 1054.) if kind == 'uhsas' else (optical_geometry.POPSGeom(), 405.)
-    if kind == 'pops_direct':
-        geom = replace(geom, pmt_aperture_d_mm=5., pmt_aperture_distance_mm=20.)
-    kernel = 'uhsas' if kind == 'uhsas' else 'pops'
+    setup = _setup_with_optional_direct(kind)
     real_integrator = od.setup_csca
     calls = []
-
     def record_call(diameters, refractive_index, setup, *, _cache=None):
         calls.append((setup, _cache))
         return real_integrator(diameters, refractive_index, setup, _cache=_cache)
-
     monkeypatch.setattr(od, 'setup_csca', record_call)
-    path = tmp_path / (kind+'.zarr')
-    optical_lut.build_sigma_lut(str(path), kernel, wavelength, geom,
-        D_range=(100., 1000., 3), n_range=(1.5, 1.6, .1), k_values=(0., .001),
-        chunks=(3, 2, 1), jobs_per_k=1)
-    assert len(calls) == 4
-    assert all(isinstance(cache, dict) for _, cache in calls)
-    root = zarr.open(str(path), mode='r')
-    attrs = dict(root.attrs)
-    assert attrs['kernel'] == kernel.upper()
-    assert attrs['collection_arms'] == 1
-    assert attrs['optical_model_version'] == optical_geometry.OPTICAL_MODEL_VERSION
-    full_setup = optical_geometry.optical_setup_from_lut_metadata(attrs)
-    result = real_integrator(np.asarray(root['coords/D_nm']), 1.5, full_setup)
-    if kind == 'uhsas':
-        assert len(full_setup.beams) == 2 and len(full_setup.channels) == 2
-        assert attrs['response_channels'] == ['Collection 1']
-        expected = result['Collection 1']
-    else:
-        assert attrs['direct_collection'] == (kind == 'pops_direct')
-        assert attrs['response_channels'] == list(result)
-        expected = np.sum(list(result.values()), axis=0)
-    assert np.array_equal(root['sigma_col'][:, 0, 0], expected.astype(np.float32))
+    path = tmp_path/(kind+'.zarr')
+    optical_lut.build_setup_sigma_lut(path, setup,
+        D_range=(100.,1000.,3), n_range=(1.5,1.6,.1), k_values=(0.,.001),
+        chunks=(3,2,1), jobs_per_k=1)
+    assert len(calls) == 4 and all(isinstance(cache,dict) for _,cache in calls)
+    root = zarr.open_group(path, mode='r')
+    assert root.attrs['response_channels'] == [setup.response_channel]
+    assert optical_geometry.optical_setup_from_lut_metadata(root.attrs) == setup
+    expected = real_integrator(np.asarray(root['coords/D_nm']),1.5,setup)[setup.response_channel]
+    np.testing.assert_allclose(root['sigma_col'][:,0,0],expected,rtol=1e-7)
+    # Even with an additional detector, the selected response is not doubled.
+    assert all(len(calculation.channels)==1 for calculation,_ in calls)
 
 
 @pytest.mark.parametrize('kind', ['pops', 'uhsas'])
@@ -190,7 +175,7 @@ def test_preset_input_validation_is_performed_by_shared_path(kind):
 
 
 def test_full_sphere_directional_integral_is_total_scattering():
-    setup = optical_geometry.uhsas_optical_setup()
+    setup = optical_geometry.load_optical_setup("uhsas")
     mu, weights = leggauss(100)
     phi = (np.arange(120)+.5)*2*np.pi/120
     dirs = np.stack(np.broadcast_arrays(
@@ -212,6 +197,9 @@ def test_custom_lut_stores_full_setup_and_selected_channel(tmp_path):
     assert root.attrs['response_channels'] == ['tilted']
     assert optical_geometry.optical_setup_from_lut_metadata(root.attrs) == setup
     lut = optical_lut.SigmaLUT(str(path))
+    assert lut.optical_setup == setup
+    assert lut.response_channels == ('tilted',)
+    assert lut.metadata['normalization'] == root.attrs['normalization']
     assert np.allclose(lut.SIG[:, 0, 0], od.setup_csca(lut.Dg, 1.5, setup)['tilted'], rtol=1e-7)
     with pytest.raises(ValueError, match='select exactly one'):
         optical_lut.build_setup_sigma_lut(str(tmp_path/'bad.zarr'), setup, channel='absent')
@@ -225,12 +213,6 @@ PRE_INTERFACE_VALUES = [{"name":"pops","D":[60,100,300,1000,3000,5000],"ri":[1.3
 
 def test_preset_values_are_bitwise_unchanged_from_pre_interface_snapshot():
     for row in PRE_INTERFACE_VALUES:
-        ri = complex(*row['ri'])
-        if row['name'] == 'pops':
-            actual = np.sum(list(od.setup_csca(row['D'], ri, optical_geometry.pops_optical_setup(optical_geometry.POPSGeom(), wavelength_nm=405.)).values()), axis=0)
-            shared = od.setup_csca(row['D'], ri, optical_geometry.pops_optical_setup())['Collection']
-        else:
-            actual = od.setup_csca(row['D'], ri, optical_geometry.uhsas_optical_setup(optical_geometry.UHSASGeom(), wavelength_nm=1054.))["Collection 1"]
-            shared = od.setup_csca(row['D'], ri, optical_geometry.uhsas_optical_setup())['Collection 1']
-        assert np.array_equal(actual, row['sigma'])
-        assert np.array_equal(shared, row['sigma'])
+        setup = optical_geometry.load_optical_setup(row['name'])
+        actual = od.setup_csca(row['D'],complex(*row['ri']),setup)[setup.response_channel]
+        np.testing.assert_array_equal(actual,row['sigma'])

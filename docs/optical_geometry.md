@@ -62,7 +62,7 @@ analyzers after scattering are not included in this interface.
 
 ## How the integral uses the setup
 
-PCASP is available through `pcasp_optical_setup()`. It uses one full-azimuth
+PCASP is available through `load_optical_setup("pcasp")`. It uses one full-azimuth
 band about the outgoing laser (35-120 degrees), defined with the same cone
 and exclusion interface. The returning beam sees that same opening at
 60-145 degrees. See [PCASP inputs and assumptions](pcasp_optics.md).
@@ -84,19 +84,18 @@ does not validate an instrument's physical dimensions.
 
 ## Presets, LUT metadata and the figure
 
-`pops_optical_setup()` describes the approved mirror-only POPS model.
-The optional legacy POPS direct path retains its explicitly labeled side-on
-approximation, not a newly verified aperture location; it is off by default.
-Use a custom setup with measured directions for a different direct path.
-`uhsas_optical_setup()` describes two opposing collection channels, each
+`load_optical_setup("pops")` describes the approved mirror-only POPS model.
+A direct path requires an explicitly configured detector with measured geometry.
+No extra POPS path is silently added.
+`load_optical_setup("uhsas")` describes two opposing collection channels, each
 with its own central excluded cone, and two equal counterpropagating beams.
 Use `setup_csca` for either setup and select the named detector from its result.
 
 New LUTs store the complete serialized setup and selected response channels.
-`optical_setup_from_lut_metadata()` restores it for plotting. It also adapts
-the known version-1 POPS/UHSAS LUT metadata; it rejects unknown old geometries
-rather than inferring their missing directions. Existing production LUTs
-are not changed by the interface refactor.
+`optical_setup_from_lut_metadata()` restores it for plotting. Missing geometry is rejected rather than reconstructed from instrument names.
+The existing POPS/UHSAS tables received verified metadata snapshots before
+removing the old adapters; their numerical arrays were not changed. The
+separate 200-k builds recalculate the tables with full setup metadata.
 
 The paper notebook renders one native 3D scene with PyVista/VTK, including
 curved collectors, rays, flow, the polarization symbol, and the phase curve.

@@ -12,15 +12,12 @@ __version__ = "0.1.0"
 
 _MODULE_EXPORTS = {
     "optical_lut": (
-        "SigmaLUT", "sigma_query_zarr", "build_sigma_lut", "build_setup_sigma_lut",
-        "build_pops_sigma_lut", "build_uhsas_sigma_lut", "build_pcasp_sigma_lut",
+        "SigmaLUT", "sigma_query_zarr", "build_setup_sigma_lut",
     ),
     "optical_geometry": (
         "load_optical_setup", "OpticalSetup", "IncidentBeam", "CollectionCone",
-        "CollectionChannel", "POPSGeom", "UHSASGeom", "PCASPGeom",
-        "pops_optical_setup", "uhsas_optical_setup", "pcasp_optical_setup",
-        "optical_setup_from_lut_metadata", "POPS_WAVELENGTH_NM",
-        "UHSAS_WAVELENGTH_NM", "PCASP_WAVELENGTH_NM", "RI_UHSAS_SRC", "RI_POPS_SRC",
+        "CollectionChannel",
+        "optical_setup_from_lut_metadata",
     ),
     "uncertainty": (
         "UncertaintyUnavailable",

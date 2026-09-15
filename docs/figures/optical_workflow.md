@@ -18,7 +18,7 @@ The selected detector is also an explicit build input.
 ```mermaid
 flowchart TD
     T["OPC geometry TOML"] --> L["load_optical_setup()"]
-    D["Diameter grid D"] --> B["build_setup_sigma_lut() → build_sigma_lut()"]
+    D["Diameter grid D"] --> B["build_setup_sigma_lut()"]
     N["Real-RI grid n"] --> B
     K["Imaginary-RI grid k"] --> B
     C["Selected detector"] --> B

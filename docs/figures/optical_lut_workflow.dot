@@ -10,7 +10,7 @@ digraph lut {
   real [label="Real refractive-index grid\nn", fillcolor="#e5f0f4"];
   imag [label="Imaginary refractive-index grid\nk", fillcolor="#e5f0f4"];
   detector [label="Selected detector\nChannel name", fillcolor="#e5f0f4"];
-  build [label="build_setup_sigma_lut() → build_sigma_lut()\nPrepare the selected detector and sampling grids"];
+  build [label="build_setup_sigma_lut()\nPrepare the selected detector and sampling grids"];
   cache [label="setup_geometry_cache()\nFor each detector and incident beam"];
   mask [label="Resolve accepted azimuths at each θ\nA(θ,φ) = 1 inside collected directions, 0 outside\nCombine collection cones; remove exclusions"];
   phi [label=<Integrate over φ analytically (0 to 2π)<BR/>W<SUB>⊥</SUB>(θ) = ∫ A(θ,φ) cos<SUP>2</SUP>φ dφ<BR/>W<SUB>∥</SUB>(θ) = ∫ A(θ,φ) sin<SUP>2</SUP>φ dφ>];

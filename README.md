@@ -119,6 +119,116 @@ logarithm of particle diameter; `N` is number concentration and `D` is diameter.
 coverage. The parameter `lam` controls the smoothness penalty; select it for the
 size resolution and measurement agreement required by your application.
 
+### Fit and merge three instruments
+
+This template combines a fixed reference instrument, an optical particle counter,
+and an aerodynamic particle sizer. Replace each `...` with your data or settings
+before running it. The reference should already use the diameter coordinate
+intended for the merged result.
+
+```python
+import sizedistmerge as sdm
+
+# Inputs: bin edges in nm; dN/dlog10(D) in cm^-3.
+ref_edges, ref_y = ..., ...
+optical_edges, optical_y = ..., ...
+aero_edges, aero_y = ..., ...
+
+lut = ...                  # Optical lookup table
+calibration_ri = ...        # Optical instrument's calibration refractive index
+fixed_k = ...               # Fixed imaginary part of particle refractive index
+shape_factor = ...
+pressure_hPa, temperature_C = ..., ...
+
+n_bounds = ...             # (minimum, maximum) real refractive index
+density_bounds = ...       # (minimum, maximum) density in kg/m^3
+output_edges_nm = ...       # Desired merged bin edges
+smoothing_strength = ...
+
+
+# 1. Define how each instrument's diameters change with its fitted parameter.
+
+def convert_optical(edges, parameters):
+    n = parameters[0]
+    return sdm.convert_do_lut(
+        edges,
+        ri_src=calibration_ri,
+        ri_dst=complex(n, fixed_k),
+        lut=lut,
+    )
+
+
+def convert_aerodynamic(edges, parameters):
+    density = parameters[0]
+    return sdm.da_to_dv(
+        edges,
+        rho_p=density,
+        chi_t=shape_factor,
+        pres_hPa=pressure_hPa,
+        temp_C=temperature_C,
+    )
+
+
+# 2. Fit both instruments against the fixed reference.
+# The fitting function adjusts distribution heights as bin edges change,
+# preserving each bin's number concentration.
+
+parameters, cost, result, history = sdm.optimize_multi_custom(
+    ref_mids=sdm.mids_from_edges(ref_edges),
+    ref_y=ref_y,
+    instruments=[
+        {
+            "edges": optical_edges,
+            "y": optical_y,
+            "remap_fn": convert_optical,
+        },
+        {
+            "edges": aero_edges,
+            "y": aero_y,
+            "remap_fn": convert_aerodynamic,
+        },
+    ],
+    bounds_list=[[n_bounds], [density_bounds]],
+    moment="N",    # Compare number distributions
+    space="log",   # Compare logarithms of distribution heights
+)
+
+# Inspect result.success, result.message, and the fitted agreement.
+aligned_optical_edges = convert_optical(optical_edges, parameters[0])
+aligned_aero_edges = convert_aerodynamic(aero_edges, parameters[1])
+
+
+# 3. Merge aligned edges with the original bin concentrations.
+
+series = [
+    {
+        "name": "reference",
+        "edges": ref_edges,
+        "number": sdm.counts_from_dndlog(ref_y, edges_nm=ref_edges),
+    },
+    {
+        "name": "optical",
+        "edges": aligned_optical_edges,
+        "number": sdm.counts_from_dndlog(optical_y, edges_nm=optical_edges),
+    },
+    {
+        "name": "aerodynamic",
+        "edges": aligned_aero_edges,
+        "number": sdm.counts_from_dndlog(aero_y, edges_nm=aero_edges),
+    },
+]
+
+merged, diagnostics = sdm.merge_sizedists_bin_totals(
+    output_edges_nm,
+    series,
+    lam=smoothing_strength,
+)
+```
+
+Calculate bin concentrations using the original edges, then pair those
+concentrations with the fitted edges for merging. Each instrument retains its
+own bins until the final fit produces `merged` on the chosen output grid.
+
 ## Examples and documentation
 
 The example notebooks cover the main workflows:

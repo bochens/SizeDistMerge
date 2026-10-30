@@ -126,6 +126,13 @@ and an aerodynamic particle sizer. Replace each `...` with your data or settings
 before running it. The reference should already use the diameter coordinate
 intended for the merged result.
 
+The settings below compare the optical instrument with the reference and the
+aerodynamic instrument with the optical instrument:
+
+```text
+Reference <-> Optical <-> Aerodynamic
+```
+
 ```python
 import sizedistmerge as sdm
 
@@ -169,31 +176,49 @@ def convert_aerodynamic(edges, parameters):
     )
 
 
-# 2. Fit both instruments against the fixed reference.
+# 2. Choose the fitted parameters and the instrument comparisons.
 # The fitting function adjusts distribution heights as bin edges change,
 # preserving each bin's number concentration.
+
+instruments = [
+    {   # Instrument 0: optical counter; fit its real refractive index.
+        "edges": optical_edges,
+        "y": optical_y,
+        "remap_fn": convert_optical,
+        "w_ref": 1.0,  # Compare optical with reference.
+    },
+    {   # Instrument 1: aerodynamic sizer; fit its particle density.
+        "edges": aero_edges,
+        "y": aero_y,
+        "remap_fn": convert_aerodynamic,
+        "w_ref": 0.0,  # Disable aerodynamic-versus-reference comparison.
+    },
+]
+
+bounds_list = [
+    [n_bounds],        # Instrument 0: one (lower, upper) tuple for n.
+    [density_bounds],  # Instrument 1: one (lower, upper) tuple for density.
+]
+pair_weights = [
+    (0, 1, 1.0),      # Compare instruments 0 and 1 with weight 1.0.
+]
 
 parameters, cost, result, history = sdm.optimize_multi_custom(
     ref_mids=sdm.mids_from_edges(ref_edges),
     ref_y=ref_y,
-    instruments=[
-        {
-            "edges": optical_edges,
-            "y": optical_y,
-            "remap_fn": convert_optical,
-        },
-        {
-            "edges": aero_edges,
-            "y": aero_y,
-            "remap_fn": convert_aerodynamic,
-        },
-    ],
-    bounds_list=[[n_bounds], [density_bounds]],
+    instruments=instruments,
+    bounds_list=bounds_list,
+    pair_weights=pair_weights,
     moment="N",    # Compare number distributions
     space="log",   # Compare logarithms of distribution heights
 )
 
-# Inspect result.success, result.message, and the fitted agreement.
+# Check convergence, then inspect the fitted agreement before using the result.
+if not result.success:
+    raise RuntimeError(result.message)
+
+fitted_n = parameters[0][0]
+fitted_density_kg_m3 = parameters[1][0]
 aligned_optical_edges = convert_optical(optical_edges, parameters[0])
 aligned_aero_edges = convert_aerodynamic(aero_edges, parameters[1])
 
@@ -205,16 +230,19 @@ series = [
         "name": "reference",
         "edges": ref_edges,
         "number": sdm.counts_from_dndlog(ref_y, edges_nm=ref_edges),
+        "alpha": 1.0,
     },
     {
         "name": "optical",
         "edges": aligned_optical_edges,
         "number": sdm.counts_from_dndlog(optical_y, edges_nm=optical_edges),
+        "alpha": 1.0,
     },
     {
         "name": "aerodynamic",
         "edges": aligned_aero_edges,
         "number": sdm.counts_from_dndlog(aero_y, edges_nm=aero_edges),
+        "alpha": 1.0,
     },
 ]
 
@@ -228,6 +256,64 @@ merged, diagnostics = sdm.merge_sizedists_bin_totals(
 Calculate bin concentrations using the original edges, then pair those
 concentrations with the fitted edges for merging. Each instrument retains its
 own bins until the final fit produces `merged` on the chosen output grid.
+
+#### Parameter order and bounds
+
+The order of `instruments` determines the meaning of every instrument index:
+
+| Instrument | Index in `instruments` | Fitted parameter | Returned value |
+| --- | --- | --- | --- |
+| Optical counter | `0` | Real refractive index `n` | `parameters[0][0]` |
+| Aerodynamic sizer | `1` | Particle density in kg/m³ | `parameters[1][0]` |
+
+The reference is supplied separately through `ref_mids` and `ref_y` and stays
+fixed during fitting.
+
+`bounds_list` follows the same instrument order. Its outer list has one entry
+per instrument; each inner list has one `(lower, upper)` tuple per fitted
+parameter. For example, `n_bounds = (1.3, 1.8)` would allow `n` to vary from 1.3
+to 1.8. These are illustrative limits; choose bounds appropriate to the
+measurements and optical table. The density bounds use kg/m³.
+
+Each conversion function receives its instrument's parameter array. In this
+template both functions use `parameters[0]` because each fits one parameter.
+If a conversion function fits two parameters, give that instrument two bound
+tuples and read them as `parameters[0]` and `parameters[1]` inside that function.
+Fixed settings such as `fixed_k` and `shape_factor` remain unchanged during
+this fit.
+
+#### Choosing which distributions to compare
+
+`w_ref` belongs to an instrument's configuration and weights its comparison
+with the reference. Setting it to `0.0` disables that comparison; omitting it
+uses `1.0`.
+
+Each entry in `pair_weights` is `(first_index, second_index, weight)`. Thus,
+`(0, 1, 1.0)` compares the optical and aerodynamic instruments with weight 1.0.
+The first two numbers refer to positions in `instruments`. Use `None` or an
+empty list to omit these additional comparisons.
+
+| Selected comparisons | Optical `w_ref` | Aerodynamic `w_ref` | `pair_weights` |
+| --- | --- | --- | --- |
+| Reference–optical and reference–aerodynamic | `1.0` | `1.0` | `None` |
+| Reference–optical and optical–aerodynamic (template above) | `1.0` | `0.0` | `[(0, 1, 1.0)]` |
+| All three pairs | `1.0` | `1.0` | `[(0, 1, 1.0)]` |
+
+The fitting error is the weighted average of the selected comparisons that
+have overlapping diameter ranges. A weight of `2.0` gives a comparison twice
+the influence of one weighted `1.0`. Pairs without overlap are skipped, so
+check that each fitted instrument has a usable comparison and that the chosen
+comparisons connect it to the reference. With `moment="N"` and `space="log"`,
+each comparison measures squared differences between the logarithms of number
+distribution heights.
+
+#### Weights for the final merge
+
+The merger's `alpha` weights control how strongly each instrument's bin
+concentrations influence the merged distribution. The template uses `alpha=1.0`
+for all three instruments. Set these separately from the alignment weights
+`w_ref` and `pair_weights`. The parameter `lam` sets the smoothness penalty;
+larger values place more weight on a smooth merged distribution.
 
 ## Examples and documentation
 

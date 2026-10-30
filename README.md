@@ -35,6 +35,55 @@ selected by your Jupyter kernel.
 
 ## Quick start
 
+### Fit an optical distribution to a reference
+
+This synthetic example uses the POPS lookup table to fit the real part `n` of
+the particle refractive index `n + ik`, with the imaginary part `k` fixed at zero.
+The reference is constructed with `n = 1.45`. Diameters are in nanometers, and
+distribution heights are `dN/dlog10(D)` in cm⁻³.
+
+```python
+import numpy as np
+import sizedistmerge as sdm
+
+lut = sdm.SigmaLUT(str(sdm.lut_path("pops")))
+calibration_ri = 1.615 + 0.001j
+optical_edges_nm = np.array([150., 200., 300., 500., 800.])
+optical_dndlog = np.array([100., 60., 20., 5.])
+
+# Construct a reference with a known refractive index.
+reference_edges_nm = sdm.convert_do_lut(
+    optical_edges_nm, calibration_ri, 1.45 + 0j, lut, response_bins=100
+)
+reference_dndlog = sdm.remap_dndlog_by_edges(
+    optical_edges_nm, reference_edges_nm, optical_dndlog
+)
+
+n_fit, k_fit, cost, result, history = sdm.optimize_refractive_index_for_opc(
+    sdm.mids_from_edges(reference_edges_nm), reference_dndlog,
+    optical_edges_nm, optical_dndlog, calibration_ri, lut,
+    bounds=((1.35, 1.60), (0., 0.)),
+    response_bins=100, moment="N", space="log", seed=123,
+)
+aligned_edges_nm = sdm.convert_do_lut(
+    optical_edges_nm, calibration_ri, complex(n_fit, k_fit), lut,
+    response_bins=100,
+)
+print(f"Fitted refractive index: {n_fit:.3f} + {k_fit:.3f}i")
+print("Optimizer converged:", result.success)
+```
+
+The fitted real refractive index should be approximately `1.45`. The optimizer
+converts the optical bin edges at each trial refractive index, preserves each
+bin's number concentration, and minimizes squared differences between the
+logarithms of the distribution heights over their overlapping diameter range.
+`aligned_edges_nm` gives the fitted diameter edges for subsequent merging.
+For measured data, supply the reference spectrum, optical bin edges and
+distribution, calibration refractive index, and physically appropriate bounds.
+The fitted index depends on the reference and optical-model assumptions.
+
+### Merge aligned distributions
+
 This example merges two synthetic distributions whose bin edges are already
 expressed in the same diameter coordinate. Diameters are in nanometers, and
 `number` contains the number concentration in each bin in cm⁻³.
